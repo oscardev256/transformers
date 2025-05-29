@@ -2164,7 +2164,7 @@ class Qwen2VLAudioForConditionalGeneration2(Qwen2VLForConditionalGeneration):
         '''
 
         if audio_mels is not None:
-            print(f"audio_mels shape 1 = {audio_mels.shape}")
+            #print(f"audio_mels shape 1 = {audio_mels.shape}")
             # Whisper expects (B, T, 80) float32
             if audio_mels.dim() != 3:
                 raise ValueError("`audio_mels` must be 3-D (batch, 80, frames) or (batch, frames, 80).")
@@ -2175,14 +2175,14 @@ class Qwen2VLAudioForConditionalGeneration2(Qwen2VLForConditionalGeneration):
             audio_feats = audio_mels
             #audio_feats = audio_feats.to(dtype=torch.float32)
             audio_feats = audio_feats.to(dtype=torch.bfloat16)
-            print(f"audio_feats shape = {audio_feats.shape}")
+            #print(f"audio_feats shape = {audio_feats.shape}")
             #whisper_out = self.audio_encoder(
             #    audio_feats, attention_mask=audio_attention_mask
             #)
             whisper_out = self.audio_encoder(
                 audio_feats
             )            
-            print("Here after passing through audio encoder...")
+            #print("Here after passing through audio encoder...")
             audio_hidden = (
                 whisper_out.last_hidden_state
                 if hasattr(whisper_out, "last_hidden_state")
@@ -2208,7 +2208,7 @@ class Qwen2VLAudioForConditionalGeneration2(Qwen2VLForConditionalGeneration):
             print(f"[CHECK] input_ids contain {tokens.count(pad_tok)} {pad_tok!r} tokens "
                 f"(expected {expected_pads})")
             '''
-            print(f"self.audio_token_id = {self.audio_token_id}")
+            #print(f"self.audio_token_id = {self.audio_token_id}")
             audio_embeds = audio_embeds.reshape(-1, audio_embeds.size(-1))
             n_audio_tokens   = (input_ids == self.audio_token_id).sum().item()
             n_audio_features = audio_embeds.size(0)
@@ -2416,7 +2416,7 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
                 inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
 
             if audio_mels is not None:
-                print(f"audio_mels shape 1 = {audio_mels.shape}")
+                #print(f"audio_mels shape 1 = {audio_mels.shape}")
                 # Whisper expects (B, T, 80) float32
                 if audio_mels.dim() != 3:
                     raise ValueError("`audio_mels` must be 3-D (batch, 80, frames) or (batch, frames, 80).")
@@ -2427,14 +2427,14 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
                 audio_feats = audio_mels
                 #audio_feats = audio_feats.to(dtype=torch.float32)
                 audio_feats = audio_feats.to(dtype=torch.bfloat16)
-                print(f"audio_feats shape = {audio_feats.shape}")
+                #print(f"audio_feats shape = {audio_feats.shape}")
                 #whisper_out = self.audio_encoder(
                 #    audio_feats, attention_mask=audio_attention_mask
                 #)
                 whisper_out = self.audio_encoder(
                     audio_feats
                 )            
-                print("Here after passing through audio encoder...")
+                #print("Here after passing through audio encoder...")
                 audio_hidden = (
                     whisper_out.last_hidden_state
                     if hasattr(whisper_out, "last_hidden_state")
@@ -2460,7 +2460,7 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
                 print(f"[CHECK] input_ids contain {tokens.count(pad_tok)} {pad_tok!r} tokens "
                     f"(expected {expected_pads})")
                 '''
-                print(f"self.audio_token_id = {self.audio_token_id}")
+                #print(f"self.audio_token_id = {self.audio_token_id}")
                 audio_embeds = audio_embeds.reshape(-1, audio_embeds.size(-1))
                 n_audio_tokens   = (input_ids == self.audio_token_id).sum().item()
                 n_audio_features = audio_embeds.size(0)
@@ -2471,7 +2471,7 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
 
             mask = (input_ids == self.audio_token_id).unsqueeze(-1).expand_as(inputs_embeds)
             inputs_embeds = inputs_embeds.masked_scatter(mask, audio_embeds.to(inputs_embeds.dtype))
-            print("Updated audio class..")
+            #print("Updated audio class..")
             if attention_mask is not None:
                 attention_mask = attention_mask.to(inputs_embeds.device)
 
