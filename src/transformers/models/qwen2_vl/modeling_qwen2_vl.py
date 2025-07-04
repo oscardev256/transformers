@@ -2303,8 +2303,8 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
         super().__init__(config)
 
         # ------------------- Whisper encoder -------------------
-        #whisper_model = WhisperModel.from_pretrained("openai/whisper-tiny")
-        whisper_model = WhisperModel.from_pretrained("openai/whisper-large-v3-turbo")
+        whisper_model = WhisperModel.from_pretrained("openai/whisper-tiny")
+        #whisper_model = WhisperModel.from_pretrained("openai/whisper-large-v3-turbo")
         self.audio_encoder = whisper_model.encoder           # (B,T,80) → (B,T',d_model)
         self.audio_proj   = nn.Linear(
             whisper_model.config.d_model, config.hidden_size, bias=False
