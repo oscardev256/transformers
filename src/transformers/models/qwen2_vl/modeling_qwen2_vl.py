@@ -2090,7 +2090,7 @@ class Qwen2VLAudioForConditionalGeneration2(Qwen2VLForConditionalGeneration):
         self.audio_proj = nn.Sequential(
             nn.Linear(whisper_model.config.d_model, intermediate_dim, bias=False),
             nn.GELU(),
-            nn.Linear(intermediate_dim, config.hidden_size, bias=False)
+            nn.Linear(config.hidden_size/2, config.hidden_size, bias=False)
         )
 
         # ------------------- special token ids -----------------
