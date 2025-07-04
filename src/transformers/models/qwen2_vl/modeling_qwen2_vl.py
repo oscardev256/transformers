@@ -2488,8 +2488,8 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
                         f"Found {n_audio_tokens} <audio_pad> tokens but {n_audio_features} audio frames."
                     )
 
-            mask = (input_ids == self.audio_token_id).unsqueeze(-1).expand_as(inputs_embeds)
-            inputs_embeds = inputs_embeds.masked_scatter(mask, audio_embeds.to(inputs_embeds.dtype))
+                mask = (input_ids == self.audio_token_id).unsqueeze(-1).expand_as(inputs_embeds)
+                inputs_embeds = inputs_embeds.masked_scatter(mask, audio_embeds.to(inputs_embeds.dtype))
             #print("Updated audio class..")
             if attention_mask is not None:
                 attention_mask = attention_mask.to(inputs_embeds.device)
