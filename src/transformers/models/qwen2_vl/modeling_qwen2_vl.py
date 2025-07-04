@@ -2305,8 +2305,17 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
         # ------------------- Whisper encoder -------------------
         whisper_model = WhisperModel.from_pretrained("openai/whisper-tiny")
         self.audio_encoder = whisper_model.encoder           # (B,T,80) → (B,T',d_model)
-        self.audio_proj   = nn.Linear(
-            whisper_model.config.d_model, config.hidden_size, bias=False
+        #self.audio_proj   = nn.Linear(
+        #    whisper_model.config.d_model, config.hidden_size, bias=False
+        #)
+
+        # Two-layer projection: d_model → intermediate_dim → hidden_size
+        intermediate_dim = config.hidden_size/2 # You can pick a reasonable size like 512 or 1024
+
+        self.audio_proj = nn.Sequential(
+            nn.Linear(whisper_model.config.d_model, intermediate_dim, bias=False),
+            nn.GELU(),
+            nn.Linear(intermediate_dim, config.hidden_size, bias=False)
         )
 
         # ------------------- special token ids -----------------
