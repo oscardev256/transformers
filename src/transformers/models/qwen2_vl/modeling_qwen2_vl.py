@@ -2060,235 +2060,6 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from torch.nn import CrossEntropyLoss
 from transformers import WhisperModel
 
-# --------------------------------------------------------------------
-#  Qwen2VLAudioForConditionalGeneration
-#  (adds Whisper-based audio understanding to the original Qwen2-VL)
-# --------------------------------------------------------------------
-class Qwen2VLAudioForConditionalGeneration2(Qwen2VLForConditionalGeneration):
-    """
-    Extends Qwen2VLForConditionalGeneration with an audio pathway.
-
-    * Whisper-tiny encoder produces frame-level features from log-Mel inputs.
-    * Features are projected to the LLM hidden size and injected at <audio_pad>
-      token positions, exactly like how image/video features are injected at
-      <image_pad>/<video_pad> tokens.
-    """
-
-    def __init__(self, config: Qwen2VLConfig):
-        super().__init__(config)
-
-        # ------------------- Whisper encoder -------------------
-        whisper_model = WhisperModel.from_pretrained("openai/whisper-tiny")
-        self.audio_encoder = whisper_model.encoder           # (B,T,80) → (B,T',d_model)
-        #self.audio_proj   = nn.Linear(
-        #    whisper_model.config.d_model, config.hidden_size, bias=False
-        #)
-
-        # Two-layer projection: d_model → intermediate_dim → hidden_size
-        intermediate_dim = 1024  # You can pick a reasonable size like 512 or 1024
-
-        self.audio_proj = nn.Sequential(
-            nn.Linear(whisper_model.config.d_model, intermediate_dim, bias=False),
-            nn.GELU(),
-            nn.Linear(config.hidden_size/2, config.hidden_size, bias=False)
-        )
-
-        # ------------------- special token ids -----------------
-        # Make sure your tokenizer / config.json defines these IDs.
-        self.audio_token_id       = config.audio_token_id
-        self.audio_start_token_id = config.audio_start_token_id
-        self.audio_end_token_id   = config.audio_end_token_id
-
-    # ------------------------------------------------------------------
-    # forward
-    # ------------------------------------------------------------------
-    def forward(
-        self,
-        input_ids:               Optional[torch.LongTensor] = None,
-        attention_mask:          Optional[torch.Tensor]     = None,
-        position_ids:            Optional[torch.LongTensor] = None,
-        past_key_values:         Optional[List[torch.FloatTensor]] = None,
-        inputs_embeds:           Optional[torch.FloatTensor] = None,
-        labels:                  Optional[torch.LongTensor] = None,
-        use_cache:               Optional[bool] = None,
-        output_attentions:       Optional[bool] = None,
-        output_hidden_states:    Optional[bool] = None,
-        return_dict:             Optional[bool] = None,
-        pixel_values:            Optional[torch.Tensor] = None,
-        pixel_values_videos:     Optional[torch.Tensor] = None,
-        image_grid_thw:          Optional[torch.LongTensor] = None,
-        video_grid_thw:          Optional[torch.LongTensor] = None,
-        rope_deltas:             Optional[torch.LongTensor] = None,
-        cache_position:          Optional[torch.LongTensor] = None,
-        # -------- audio-specific --------
-        audio_mels:              Optional[torch.FloatTensor] = None,  # (B, 80, T) or (B, T, 80)
-        audio_lengths:   Optional[torch.LongTensor]  = None,
-        audio_attention_mask:    Optional[torch.LongTensor]  = None,  # (B, T)
-    ) -> Qwen2VLCausalLMOutputWithPast:
-
-        # -------------------------------------------------------
-        # 1. Build token-level embeddings (text + image + video)
-        #    using the parent implementation
-        # -------------------------------------------------------
-        if inputs_embeds is None:
-            inputs_embeds = self.model.embed_tokens(input_ids)
-
-        # ---------------- image embeddings ----------------
-        if pixel_values is not None:
-            pixel_values = pixel_values.to(self.visual.get_dtype())
-            image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)          # (N_img_tokens, h)
-            n_tokens    = (input_ids == self.config.image_token_id).sum().item()
-            if n_tokens != image_embeds.size(0):
-                raise ValueError(
-                    f"Found {n_tokens} <image_pad> tokens but {image_embeds.size(0)} image features."
-                )
-            mask = (input_ids == self.config.image_token_id).unsqueeze(-1).expand_as(inputs_embeds)
-            inputs_embeds = inputs_embeds.masked_scatter(mask, image_embeds.to(inputs_embeds.dtype))
-
-        # ---------------- video embeddings ----------------
-        if pixel_values_videos is not None:
-            pixel_values_videos = pixel_values_videos.to(self.visual.get_dtype())
-            video_embeds = self.visual(pixel_values_videos, grid_thw=video_grid_thw)   # (N_vid_tokens, h)
-            n_tokens    = (input_ids == self.config.video_token_id).sum().item()
-            if n_tokens != video_embeds.size(0):
-                raise ValueError(
-                    f"Found {n_tokens} <video_pad> tokens but {video_embeds.size(0)} video features."
-                )
-            mask = (input_ids == self.config.video_token_id).unsqueeze(-1).expand_as(inputs_embeds)
-            inputs_embeds = inputs_embeds.masked_scatter(mask, video_embeds.to(inputs_embeds.dtype))
-
-        # -------------------------------------------------------
-        # 2. Audio: log-Mel → Whisper encoder → projection
-        # -------------------------------------------------------
-        '''
-        if audio_lengths is not None and audio_attention_mask is None:
-            # convert per-sample frame counts to a boolean mask (1=keep, 0=pad)
-            max_len = int(audio_lengths.max().item())
-            audio_attention_mask = (
-                torch.arange(max_len, device=audio_lengths.device)
-                .unsqueeze(0)
-                .expand(audio_lengths.size(0), -1)
-                < audio_lengths.unsqueeze(1)
-            ).long()                                               # (B, max_len)
-        '''
-
-        if audio_mels is not None:
-            #print(f"audio_mels shape 1 = {audio_mels.shape}")
-            # Whisper expects (B, T, 80) float32
-            if audio_mels.dim() != 3:
-                raise ValueError("`audio_mels` must be 3-D (batch, 80, frames) or (batch, frames, 80).")
-            if audio_mels.shape[1] == 80:                           # (B, 80, T) → (B, T, 80)
-                audio_feats = audio_mels.transpose(1, 2).contiguous()
-            else:
-                audio_feats = audio_mels
-            audio_feats = audio_mels
-            #audio_feats = audio_feats.to(dtype=torch.float32)
-            audio_feats = audio_feats.to(dtype=torch.bfloat16)
-            #print(f"audio_feats shape = {audio_feats.shape}")
-            #whisper_out = self.audio_encoder(
-            #    audio_feats, attention_mask=audio_attention_mask
-            #)
-            whisper_out = self.audio_encoder(
-                audio_feats
-            )            
-            #print("Here after passing through audio encoder...")
-            audio_hidden = (
-                whisper_out.last_hidden_state
-                if hasattr(whisper_out, "last_hidden_state")
-                else whisper_out[0]
-            )                                                       # (B, T', d_model)
-            audio_embeds = self.audio_proj(audio_hidden)            # (B, T', hidden)
-
-            '''
-            # flatten to (N_audio_tokens, hidden)
-            if audio_attention_mask is not None:
-                lengths = audio_attention_mask.sum(dim=1).tolist()
-                pieces = [audio_embeds[i, :L] for i, L in enumerate(lengths)]
-                audio_embeds = torch.cat(pieces, dim=0)
-            else:
-                audio_embeds = audio_embeds.reshape(-1, audio_embeds.size(-1))
-            '''
-
-            '''
-            pad_tok = "<|audio_pad|>"
-            # ╭───────────────── 8. Sanity-check #pads vs expected frames ─────────────────╮
-            tokens = processor.tokenizer.convert_ids_to_tokens(features["input_ids"][0])
-            expected_pads = sum(compute_audio_pad_count(arr, sr) for arr, sr in audio_inputs)
-            print(f"[CHECK] input_ids contain {tokens.count(pad_tok)} {pad_tok!r} tokens "
-                f"(expected {expected_pads})")
-            '''
-            #print(f"self.audio_token_id = {self.audio_token_id}")
-            audio_embeds = audio_embeds.reshape(-1, audio_embeds.size(-1))
-            n_audio_tokens   = (input_ids == self.audio_token_id).sum().item()
-            n_audio_features = audio_embeds.size(0)
-            if n_audio_tokens != n_audio_features:
-                raise ValueError(
-                    f"Found {n_audio_tokens} <audio_pad> tokens but {n_audio_features} audio frames."
-                )
-
-            mask = (input_ids == self.audio_token_id).unsqueeze(-1).expand_as(inputs_embeds)
-            inputs_embeds = inputs_embeds.masked_scatter(mask, audio_embeds.to(inputs_embeds.dtype))
-
-        # ensure attention mask lives on the same device as embeddings
-        if attention_mask is not None:
-            attention_mask = attention_mask.to(inputs_embeds.device)
-
-        # -------------------------------------------------------
-        # 3. Build/compute RoPE position ids if not provided
-        # -------------------------------------------------------
-        if position_ids is None:
-            position_ids, _ = self.get_rope_index(
-                input_ids=input_ids,
-                image_grid_thw=image_grid_thw,
-                video_grid_thw=video_grid_thw,
-                attention_mask=attention_mask,
-            )
-
-        # -------------------------------------------------------
-        # 4. Run the decoder (text + multimodal embeddings)
-        # -------------------------------------------------------
-        decoder_outputs = self.model(
-            input_ids=None,
-            position_ids=position_ids,
-            attention_mask=attention_mask,
-            past_key_values=past_key_values,
-            inputs_embeds=inputs_embeds,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=True,
-            cache_position=cache_position,
-        )
-
-        hidden_states = decoder_outputs.last_hidden_state          # (B, L, hidden)
-        logits = self.lm_head(hidden_states)                       # (B, L, vocab)
-
-        # -------------------------------------------------------
-        # 5. Optional LM loss
-        # -------------------------------------------------------
-        loss: Optional[torch.Tensor] = None
-        if labels is not None:
-            shift_logits = logits[:, :-1, :].contiguous()
-            shift_labels = labels[:, 1:].contiguous()
-            loss_fct = CrossEntropyLoss(ignore_index=-100)
-            loss = loss_fct(
-                shift_logits.view(-1, self.config.vocab_size),
-                shift_labels.view(-1),
-            )
-
-        # -------------------------------------------------------
-        # 6. Return the standard causal-LM output object
-        # -------------------------------------------------------
-        return Qwen2VLCausalLMOutputWithPast(
-            loss=loss,
-            logits=logits,
-            past_key_values=decoder_outputs.past_key_values,
-            hidden_states=decoder_outputs.hidden_states,
-            attentions=decoder_outputs.attentions,
-            rope_deltas=self.rope_deltas,
-        )
-
-
 class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
     """
     Extends Qwen2VLForConditionalGeneration with an audio pathway.
@@ -2348,8 +2119,8 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
         cache_position:          Optional[torch.LongTensor] = None,
         # -------- audio-specific --------
         audio_mels:              Optional[torch.FloatTensor] = None,  # (B, 80, T) or (B, T, 80)
-        audio_lengths:   Optional[torch.LongTensor]  = None,
-        audio_attention_mask:    Optional[torch.LongTensor]  = None,  # (B, T)
+        #audio_lengths:   Optional[torch.LongTensor]  = None,
+        #audio_attention_mask:    Optional[torch.LongTensor]  = None,  # (B, T)
     ) -> Union[Tuple, Qwen2VLCausalLMOutputWithPast]:
         r"""
             labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
@@ -2562,5 +2333,11 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
             rope_deltas=self.rope_deltas,
         )
 
+    def prepare_inputs_for_generation(self, input_ids, **kwargs):
+        audio_mels = kwargs.get("audio_mels")
+        model_inputs = super().prepare_inputs_for_generation(input_ids, **kwargs)
+        # Inject them into model_inputs to forward to forward()
+        model_inputs["audio_mels"] = audio_mels
+        return model_inputs
 
 __all__ = ["Qwen2VLForConditionalGeneration", "Qwen2VLModel", "Qwen2VLPreTrainedModel", "Qwen2VLAudioForConditionalGeneration"]
