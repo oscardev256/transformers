@@ -420,7 +420,7 @@ class Qwen2VLProcessor(ProcessorMixin):
         data = {**text_inputs, **image_inputs, **video_inputs}
         if audio_mels is not None:
             data["audio_mels"] = torch.from_numpy(audio_mels.astype(np.float32))
-            data["audio_lengths"] = np.asarray(token_counts, dtype=np.int64)
+            #data["audio_lengths"] = np.asarray(token_counts, dtype=np.int64)
 
         return BatchFeature(data=data)
 
