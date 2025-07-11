@@ -2205,6 +2205,10 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
                 video_embeds = video_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
                 inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
 
+            n_audio_tokens = (input_ids == self.audio_token_id).sum().item()
+            if n_audio_tokens == 0:
+                audio_mels = None  # Skip processing if no placeholder exists
+
             if audio_mels is not None:
                 #print(f"audio_mels shape 1 = {audio_mels.shape}")
                 # Whisper expects (B, T, 80) float32
