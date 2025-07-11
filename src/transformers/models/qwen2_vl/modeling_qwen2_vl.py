@@ -2336,8 +2336,11 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
     def prepare_inputs_for_generation(self, input_ids, **kwargs):
         audio_mels = kwargs.get("audio_mels")
         model_inputs = super().prepare_inputs_for_generation(input_ids, **kwargs)
-        # Inject them into model_inputs to forward to forward()
-        model_inputs["audio_mels"] = audio_mels
+        # Only inject audio on the first decoding step
+        if kwargs.get("past_key_values", None) is None:
+            audio_mels = kwargs.get("audio_mels")
+            model_inputs["audio_mels"] = audio_mels
+
         return model_inputs
 
 __all__ = ["Qwen2VLForConditionalGeneration", "Qwen2VLModel", "Qwen2VLPreTrainedModel", "Qwen2VLAudioForConditionalGeneration"]
