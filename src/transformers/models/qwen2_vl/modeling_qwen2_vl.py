@@ -2058,7 +2058,8 @@ import torch
 import torch.nn as nn
 from typing import Any, Dict, List, Optional, Tuple, Union
 from torch.nn import CrossEntropyLoss
-from transformers import WhisperModel
+#from transformers import WhisperModel, WhisperConfig
+from transformers import WhisperEncoder, WhisperConfig
 
 class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
     """
@@ -2073,6 +2074,9 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
     def __init__(self, config: Qwen2VLConfig):
         super().__init__(config)
 
+        whisper_cfg = WhisperConfig.from_dict(config.audio_config.to_dict())
+        self.audio_encoder = WhisperEncoder(whisper_cfg)
+        '''
         # ------------------- Whisper encoder -------------------
         whisper_model = WhisperModel.from_pretrained("openai/whisper-tiny")
         #whisper_model = WhisperModel.from_pretrained("openai/whisper-large-v3-turbo")
@@ -2080,6 +2084,8 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
         self.audio_proj   = nn.Linear(
             whisper_model.config.d_model, config.hidden_size, bias=False
         )
+        '''
+        
         '''
         # Two-layer projection: d_model → intermediate_dim → hidden_size
         intermediate_dim = config.hidden_size//2 # You can pick a reasonable size like 512 or 1024
