@@ -2074,7 +2074,8 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
     def __init__(self, config: Qwen2VLConfig):
         super().__init__(config)
 
-        whisper_cfg = WhisperConfig.from_dict(config.audio_config.to_dict())
+        #whisper_cfg = WhisperConfig.from_dict(config.audio_config.to_dict())
+        whisper_cfg = WhisperConfig()
         self.audio_encoder = WhisperEncoder(whisper_cfg)
         '''
         # ------------------- Whisper encoder -------------------
@@ -2085,7 +2086,7 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
             whisper_model.config.d_model, config.hidden_size, bias=False
         )
         '''
-        
+
         '''
         # Two-layer projection: d_model → intermediate_dim → hidden_size
         intermediate_dim = config.hidden_size//2 # You can pick a reasonable size like 512 or 1024
