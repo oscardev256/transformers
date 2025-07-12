@@ -2177,4 +2177,5 @@ __all__ = [
     "WhisperModel",
     "WhisperPreTrainedModel",
     "WhisperForAudioClassification",
+    "WhisperEncoder",
 ]
