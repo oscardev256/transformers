@@ -28,6 +28,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint
 from torch.nn import CrossEntropyLoss, LayerNorm
+from transformers import WhisperEncoder, WhisperConfig
 
 from ...activations import ACT2FN
 from ...cache_utils import Cache, DynamicCache, SlidingWindowCache, StaticCache
@@ -1327,6 +1328,351 @@ class Qwen2VLModel(Qwen2VLPreTrainedModel):
                 )
         return causal_mask
 
+class Qwen2VLAudioModel(Qwen2VLPreTrainedModel):
+    def __init__(self, config: Qwen2VLConfig):
+        super().__init__(config)
+        self.padding_idx = config.pad_token_id
+        self.vocab_size = config.vocab_size
+
+        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
+        self.layers = nn.ModuleList(
+            [Qwen2VLDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
+        )
+        self._attn_implementation = config._attn_implementation
+        self.norm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.rotary_emb = Qwen2VLRotaryEmbedding(config=config)
+
+        self.gradient_checkpointing = False
+        # Initialize weights and apply final processing
+        self.post_init()
+
+        whisper_cfg = WhisperConfig()
+        self.audio_encoder = WhisperEncoder(whisper_cfg)
+        self.audio_proj   = nn.Linear(whisper_cfg.d_model, config.hidden_size, bias=False)
+
+        # ------------------- special token ids -----------------
+        # Make sure your tokenizer / config.json defines these IDs.
+        self.audio_token_id       = config.audio_token_id
+        self.audio_start_token_id = config.audio_start_token_id
+        self.audio_end_token_id   = config.audio_end_token_id
+
+    def get_input_embeddings(self):
+        return self.embed_tokens
+
+    def set_input_embeddings(self, value):
+        self.embed_tokens = value
+
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        # -------- audio-specific --------
+        audio_mels:              Optional[torch.FloatTensor] = None,  # (B, 80, T) or (B, T, 80)        
+    ) -> Union[Tuple, BaseModelOutputWithPast]:
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+        use_cache = use_cache if use_cache is not None else self.config.use_cache
+
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        if (input_ids is None) ^ (inputs_embeds is not None):
+            raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
+
+        if self.gradient_checkpointing and self.training:
+            if use_cache:
+                logger.warning_once(
+                    "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`..."
+                )
+                use_cache = False
+
+        # torch.jit.trace() doesn't support cache objects in the output
+        if use_cache and past_key_values is None and not torch.jit.is_tracing():
+            past_key_values = DynamicCache()
+
+        if inputs_embeds is None:
+            inputs_embeds = self.embed_tokens(input_ids)
+
+        n_audio_tokens = (input_ids == self.audio_token_id).sum().item()
+        #if n_audio_tokens == 0:
+        #    audio_mels = None  # Skip processing if no placeholder exists
+
+        if (audio_mels is not None) and n_audio_tokens > 0:
+            #print(f"audio_mels shape 1 = {audio_mels.shape}")
+            # Whisper expects (B, T, 80) float32
+            if audio_mels.dim() != 3:
+                raise ValueError("`audio_mels` must be 3-D (batch, 80, frames) or (batch, frames, 80).")
+            if audio_mels.shape[1] == 80:                           # (B, 80, T) → (B, T, 80)
+                audio_feats = audio_mels.transpose(1, 2).contiguous()
+            else:
+                audio_feats = audio_mels
+            audio_feats = audio_mels
+            audio_feats = audio_feats.to(dtype=torch.bfloat16)
+            whisper_out = self.audio_encoder(audio_feats)
+
+            audio_hidden = (
+                whisper_out.last_hidden_state
+                if hasattr(whisper_out, "last_hidden_state")
+                else whisper_out[0]
+            )                                                       # (B, T', d_model)
+            audio_embeds = self.audio_proj(audio_hidden)            # (B, T', hidden)
+
+            audio_embeds = audio_embeds.reshape(-1, audio_embeds.size(-1))
+            n_audio_tokens   = (input_ids == self.audio_token_id).sum().item()
+            n_audio_features = audio_embeds.size(0)
+            if n_audio_tokens != n_audio_features:
+                raise ValueError(
+                    f"Found {n_audio_tokens} <audio_pad> tokens but {n_audio_features} audio frames."
+                )
+
+            mask = (input_ids == self.audio_token_id).unsqueeze(-1).expand_as(inputs_embeds)
+            inputs_embeds = inputs_embeds.masked_scatter(mask, audio_embeds.to(inputs_embeds.dtype))
+
+        if cache_position is None:
+            past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
+            cache_position = torch.arange(
+                past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
+            )
+
+        # the hard coded `3` is for temporal, height and width.
+        if position_ids is None:
+            position_ids = cache_position.view(1, 1, -1).expand(3, inputs_embeds.shape[0], -1)
+        elif position_ids.dim() == 2:
+            position_ids = position_ids[None, ...].expand(3, position_ids.shape[0], -1)
+
+        causal_mask = self._update_causal_mask(
+            attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions
+        )
+
+        hidden_states = inputs_embeds
+
+        # create position embeddings to be shared across the decoder layers
+        position_embeddings = self.rotary_emb(hidden_states, position_ids)
+
+        # decoder layers
+        all_hidden_states = () if output_hidden_states else None
+        all_self_attns = () if output_attentions else None
+        next_decoder_cache = None
+
+        for decoder_layer in self.layers:
+            if output_hidden_states:
+                all_hidden_states += (hidden_states,)
+
+            if self.gradient_checkpointing and self.training:
+                layer_outputs = self._gradient_checkpointing_func(
+                    decoder_layer.__call__,
+                    hidden_states,
+                    causal_mask,
+                    position_ids,
+                    past_key_values,
+                    output_attentions,
+                    use_cache,
+                    cache_position,
+                    position_embeddings,
+                )
+            else:
+                layer_outputs = decoder_layer(
+                    hidden_states,
+                    attention_mask=causal_mask,
+                    position_ids=position_ids,
+                    past_key_value=past_key_values,
+                    output_attentions=output_attentions,
+                    use_cache=use_cache,
+                    cache_position=cache_position,
+                    position_embeddings=position_embeddings,
+                )
+
+            hidden_states = layer_outputs[0]
+
+            if use_cache:
+                next_decoder_cache = layer_outputs[2 if output_attentions else 1]
+
+            if output_attentions:
+                all_self_attns += (layer_outputs[1],)
+
+        hidden_states = self.norm(hidden_states)
+
+        # add hidden states from the last decoder layer
+        if output_hidden_states:
+            all_hidden_states += (hidden_states,)
+
+        next_cache = next_decoder_cache if use_cache else None
+
+        if not return_dict:
+            return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns] if v is not None)
+        return BaseModelOutputWithPast(
+            last_hidden_state=hidden_states,
+            past_key_values=next_cache,
+            hidden_states=all_hidden_states,
+            attentions=all_self_attns,
+        )
+
+    # Copied from transformers.models.phi3.modeling_phi3.Phi3Model._update_causal_mask with Phi3->Qwen2VL
+    def _update_causal_mask(
+        self,
+        attention_mask: Union[torch.Tensor, "BlockMask"],
+        input_tensor: torch.Tensor,
+        cache_position: torch.Tensor,
+        past_key_values: Cache,
+        output_attentions: bool = False,
+    ):
+        if self.config._attn_implementation == "flash_attention_2":
+            if attention_mask is not None and past_key_values is not None:
+                is_padding_right = attention_mask[:, -1].sum().item() != input_tensor.size()[0]
+                if is_padding_right:
+                    raise ValueError(
+                        "You are attempting to perform batched generation with padding_side='right'"
+                        " this may lead to unexpected behaviour for Flash Attention version of Qwen2VL. Make sure to "
+                        " call `tokenizer.padding_side  = 'left'` before tokenizing the input. "
+                    )
+            if attention_mask is not None and 0.0 in attention_mask:
+                return attention_mask
+            return None
+        if self.config._attn_implementation == "flex_attention":
+            if isinstance(attention_mask, torch.Tensor):
+                attention_mask = make_flex_block_causal_mask(attention_mask)
+            return attention_mask
+
+        # For SDPA, when possible, we will rely on its `is_causal` argument instead of its `attn_mask` argument, in
+        # order to dispatch on Flash Attention 2. This feature is not compatible with static cache, as SDPA will fail
+        # to infer the attention mask.
+        past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
+        using_static_cache = isinstance(past_key_values, StaticCache)
+        using_sliding_window_cache = isinstance(past_key_values, SlidingWindowCache)
+
+        # When output attentions is True, sdpa implementation's forward method calls the eager implementation's forward
+        if (
+            self.config._attn_implementation == "sdpa"
+            and not (using_static_cache or using_sliding_window_cache)
+            and not output_attentions
+        ):
+            if AttentionMaskConverter._ignore_causal_mask_sdpa(
+                attention_mask,
+                inputs_embeds=input_tensor,
+                past_key_values_length=past_seen_tokens,
+                sliding_window=self.config.sliding_window,
+                is_training=self.training,
+            ):
+                return None
+
+        dtype, device = input_tensor.dtype, input_tensor.device
+        min_dtype = torch.finfo(dtype).min
+        sequence_length = input_tensor.shape[1]
+        # SlidingWindowCache or StaticCache
+        if using_sliding_window_cache or using_static_cache:
+            target_length = past_key_values.get_max_cache_shape()
+        # DynamicCache or no cache
+        else:
+            target_length = (
+                attention_mask.shape[-1]
+                if isinstance(attention_mask, torch.Tensor)
+                else past_seen_tokens + sequence_length + 1
+            )
+
+        # In case the provided `attention` mask is 2D, we generate a causal mask here (4D).
+        causal_mask = self._prepare_4d_causal_attention_mask_with_cache_position(
+            attention_mask,
+            sequence_length=sequence_length,
+            target_length=target_length,
+            dtype=dtype,
+            device=device,
+            cache_position=cache_position,
+            batch_size=input_tensor.shape[0],
+            config=self.config,
+            past_key_values=past_key_values,
+        )
+
+        if (
+            self.config._attn_implementation == "sdpa"
+            and attention_mask is not None
+            and attention_mask.device.type in ["cuda", "xpu", "npu"]
+            and not output_attentions
+        ):
+            # Attend to all tokens in fully masked rows in the causal_mask, for example the relevant first rows when
+            # using left padding. This is required by F.scaled_dot_product_attention memory-efficient attention path.
+            # Details: https://github.com/pytorch/pytorch/issues/110213
+            causal_mask = AttentionMaskConverter._unmask_unattended(causal_mask, min_dtype)
+
+        return causal_mask
+
+    @staticmethod
+    # Copied from transformers.models.mistral.modeling_mistral.MistralModel._prepare_4d_causal_attention_mask_with_cache_position with Mistral->Qwen2VL
+    def _prepare_4d_causal_attention_mask_with_cache_position(
+        attention_mask: torch.Tensor,
+        sequence_length: int,
+        target_length: int,
+        dtype: torch.dtype,
+        device: torch.device,
+        cache_position: torch.Tensor,
+        batch_size: int,
+        config: Qwen2VLConfig,
+        past_key_values: Cache,
+    ):
+        """
+        Creates a causal 4D mask of shape `(batch_size, 1, query_length, key_value_length)` from a 2D mask of shape
+        `(batch_size, key_value_length)`, or if the input `attention_mask` is already 4D, do nothing.
+
+        Args:
+            attention_mask (`torch.Tensor`):
+                A 2D attention mask of shape `(batch_size, key_value_length)` or a 4D attention mask of shape `(batch_size, 1, query_length, key_value_length)`.
+            sequence_length (`int`):
+                The sequence length being processed.
+            target_length (`int`):
+                The target length: when generating with static cache, the mask should be as long as the static cache, to account for the 0 padding, the part of the cache that is not filled yet.
+            dtype (`torch.dtype`):
+                The dtype to use for the 4D attention mask.
+            device (`torch.device`):
+                The device to place the 4D attention mask on.
+            cache_position (`torch.Tensor`):
+                Indices depicting the position of the input sequence tokens in the sequence.
+            batch_size (`torch.Tensor`):
+                Batch size.
+            config (`Qwen2VLConfig`):
+                The model's configuration class
+            past_key_values (`Cache`):
+                The cache class that is being used currently to generate
+        """
+        if attention_mask is not None and attention_mask.dim() == 4:
+            # In this case we assume that the mask comes already in inverted form and requires no inversion or slicing.
+            causal_mask = attention_mask
+        else:
+            min_dtype = torch.finfo(dtype).min
+            causal_mask = torch.full(
+                (sequence_length, target_length), fill_value=min_dtype, dtype=dtype, device=device
+            )
+            diagonal_attend_mask = torch.arange(target_length, device=device) > cache_position.reshape(-1, 1)
+            if config.get_text_config().sliding_window is not None:
+                # if we have sliding window, we should not attend to tokens beyond sliding window length, so we mask them out also
+                # the check is needed to verify is current checkpoint was trained with sliding window or not
+                if not isinstance(past_key_values, SlidingWindowCache) or sequence_length > target_length:
+                    sliding_attend_mask = torch.arange(target_length, device=device) <= (
+                        cache_position.reshape(-1, 1) - config.get_text_config().sliding_window
+                    )
+                    diagonal_attend_mask.bitwise_or_(sliding_attend_mask)
+            causal_mask *= diagonal_attend_mask
+            causal_mask = causal_mask[None, None, :, :].expand(batch_size, 1, -1, -1)
+            if attention_mask is not None:
+                causal_mask = causal_mask.clone()  # copy to contiguous memory for in-place edit
+                if attention_mask.shape[-1] > target_length:
+                    attention_mask = attention_mask[:, :target_length]
+                mask_length = attention_mask.shape[-1]
+                padding_mask = causal_mask[:, :, :, :mask_length] + attention_mask[:, None, None, :].to(
+                    causal_mask.device
+                )
+                padding_mask = padding_mask == 0
+                causal_mask[:, :, :, :mask_length] = causal_mask[:, :, :, :mask_length].masked_fill(
+                    padding_mask, min_dtype
+                )
+        return causal_mask
 
 QWEN2_VL_INPUTS_DOCSTRING = r"""
     Args:
@@ -1923,145 +2269,22 @@ class Qwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMixin):
 
         return input_ids, model_kwargs
 
-'''
-import torch
-import torch.nn as nn
-from transformers import WhisperModel
-from torch.nn import CrossEntropyLoss
-
 class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
     def __init__(self, config):
         super().__init__(config)
-        # Initialize Whisper Tiny encoder for audio inputs
-        whisper_model = WhisperModel.from_pretrained("openai/whisper-tiny")
-        self.audio = whisper_model.encoder  # Whisper encoder module
-        self.audio_proj = nn.Linear(whisper_model.config.d_model, config.hidden_size)
-        # Define special token IDs for audio (should be set in config/tokenizer)
-        self.audio_token_id = config.audio_token_id
-        self.audio_start_token_id = config.audio_start_token_id
-        self.audio_end_token_id = config.audio_end_token_id
+        self.model = Qwen2VLAudioModel(config)
 
-    def forward(
-        self,
-        input_ids=None,
-        attention_mask=None,
-        position_ids=None,
-        past_key_values=None,
-        inputs_embeds=None,
-        labels=None,
-        use_cache=None,
-        output_attentions=None,
-        output_hidden_states=None,
-        return_dict=None,
-        pixel_values=None,
-        pixel_values_videos=None,
-        image_grid_thw=None,
-        video_grid_thw=None,
-        rope_deltas=None,
-        cache_position=None,
-        audio_values=None,
-        audio_attention_mask=None,
-        audio_mels:      Optional[torch.FloatTensor] = None,
-        audio_lengths:   Optional[torch.LongTensor]  = None,
-    ):
+    def prepare_inputs_for_generation(self, input_ids, **kwargs):
+        model_inputs = super().prepare_inputs_for_generation(input_ids, **kwargs)
         
-        # ------------------------------------------------------------------
-        # 0) canonicalise argument names
-        # ------------------------------------------------------------------
-        if audio_mels is None and audio_values is not None:
-            audio_mels = audio_values
-        if audio_lengths is None and audio_attention_mask is not None:
-            audio_lengths = audio_attention_mask        
-        # Prepare inputs_embeds from input_ids if not provided
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-        if inputs_embeds is None:
-            inputs_embeds = self.model.embed_tokens(input_ids)
-        # Inject image features at <image_pad> token positions (same as base implementation)
-        if pixel_values is not None:
-            pixel_values = pixel_values.to(self.visual.dtype)
-            image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)
-            n_image_tokens = (input_ids == self.config.image_token_id).sum().item()
-            n_image_features = image_embeds.shape[0]
-            if n_image_tokens != n_image_features:
-                raise ValueError(f"Image features and image tokens do not match: tokens={n_image_tokens}, features={n_image_features}")
-            image_mask = (input_ids == self.config.image_token_id).unsqueeze(-1).expand_as(inputs_embeds).to(inputs_embeds.device)
-            image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
-            inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
-        # Inject video features at <video_pad> token positions (same as base implementation)
-        if pixel_values_videos is not None:
-            pixel_values_videos = pixel_values_videos.to(self.visual.dtype)
-            video_embeds = self.visual(pixel_values_videos, grid_thw=video_grid_thw)
-            n_video_tokens = (input_ids == self.config.video_token_id).sum().item()
-            n_video_features = video_embeds.shape[0]
-            if n_video_tokens != n_video_features:
-                raise ValueError(f"Video features and video tokens do not match: tokens={n_video_tokens}, features={n_video_features}")
-            video_mask = (input_ids == self.config.video_token_id).unsqueeze(-1).expand_as(inputs_embeds).to(inputs_embeds.device)
-            video_embeds = video_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
-            inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
-        # **New**: Inject audio features at <audio_pad> token positions
-        if audio_values is not None:
-            audio_values = audio_values.to(inputs_embeds.dtype)
-            # Encode audio (log-mel spectrogram) using Whisper Tiny encoder
-            audio_encoder_outputs = self.audio(audio_values, attention_mask=audio_attention_mask)
-            audio_hidden = (audio_encoder_outputs.last_hidden_state 
-                            if hasattr(audio_encoder_outputs, "last_hidden_state") 
-                            else audio_encoder_outputs[0])
-            audio_embeds = self.audio_proj(audio_hidden)  # project to model hidden size
-            # Flatten batch of audio embeddings, handle variable lengths using mask
-            if audio_attention_mask is not None:
-                seqs = []
-                lengths = audio_attention_mask.sum(dim=1).tolist()
-                for i, length in enumerate(lengths):
-                    seqs.append(audio_embeds[i, :length, :])
-                audio_embeds = torch.cat(seqs, dim=0)
-            else:
-                audio_embeds = audio_embeds.reshape(-1, audio_embeds.size(-1))
-            # Ensure the number of audio_pad tokens matches number of audio features:contentReference[oaicite:2]{index=2}
-            n_audio_tokens = (input_ids == self.audio_token_id).sum().item()
-            n_audio_features = audio_embeds.shape[0]
-            if n_audio_tokens != n_audio_features:
-                raise ValueError(f"Audio features and audio tokens do not match: tokens={n_audio_tokens}, features={n_audio_features}")
-            # Replace <audio_pad> token embeddings with audio encoder outputs:contentReference[oaicite:3]{index=3}
-            audio_mask = (input_ids == self.audio_token_id).unsqueeze(-1).expand_as(inputs_embeds).to(inputs_embeds.device)
-            audio_embeds = audio_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
-            inputs_embeds = inputs_embeds.masked_scatter(audio_mask, audio_embeds)
-        # Compute positional encodings (RoPE) for the combined sequence
-        if position_ids is None and input_ids is not None:
-            position_ids, _ = self.get_rope_index(input_ids, image_grid_thw, video_grid_thw, attention_mask)
-        # Forward pass through the base language model with multimodal inputs
-        outputs = self.model(
-            input_ids=None,
-            position_ids=position_ids,
-            attention_mask=attention_mask.to(inputs_embeds.device) if attention_mask is not None else None,
-            past_key_values=past_key_values,
-            inputs_embeds=inputs_embeds,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-        )
-        # Compute loss if labels are provided (language modeling head)
-        if labels is not None:
-            logits = outputs.last_hidden_state if return_dict else outputs[0]
-            # Shift logits and labels for next-token prediction
-            shift_logits = logits[:, :-1, :].contiguous()
-            shift_labels = labels[:, 1:].contiguous()
-            loss_fct = CrossEntropyLoss(ignore_index=-100)
-            loss = loss_fct(shift_logits.view(-1, self.config.vocab_size), shift_labels.view(-1))
-            if not return_dict:
-                return (loss, logits) + outputs[1:]
-            outputs.loss = loss
-        return outputs
-'''
+        # Only inject audio on the first decoding step
+        if kwargs.get("past_key_values", None) is None:
+            audio_mels = kwargs.get("audio_mels")
+            model_inputs["audio_mels"] = audio_mels
 
-import torch
-import torch.nn as nn
-from typing import Any, Dict, List, Optional, Tuple, Union
-from torch.nn import CrossEntropyLoss
-#from transformers import WhisperModel, WhisperConfig
-from transformers import WhisperEncoder, WhisperConfig
+        return model_inputs
 
-class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
+class Qwen2VLAudioForConditionalGeneration2(Qwen2VLForConditionalGeneration):
     """
     Extends Qwen2VLForConditionalGeneration with an audio pathway.
 
