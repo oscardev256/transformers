@@ -2285,7 +2285,7 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
         return model_inputs
 '''
 
-class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
+class Qwen2VLAudioForConditionalGeneration2(Qwen2VLForConditionalGeneration):
     """
     Extends Qwen2VLForConditionalGeneration with an audio pathway.
 
@@ -2487,7 +2487,7 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
             
         return model_inputs
 
-class Qwen2VLAudioForConditionalGeneration2(Qwen2VLForConditionalGeneration):
+class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
     """
     Extends Qwen2VLForConditionalGeneration with an audio pathway.
 
