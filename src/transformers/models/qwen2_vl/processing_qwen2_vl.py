@@ -274,9 +274,9 @@ def _waveform_to_logmel(wav: np.ndarray) -> Tuple[np.ndarray, int]:
     return mel.cpu().numpy(), mel.shape[-1]
 
 
-def compute_audio_pad_count(n_mel_frames: int, cnn_total_stride: int = 2) -> int:
+def compute_audio_pad_count(n_mel_frames: int, cnn_total_stride: int = 2, compression_stride: int = 30) -> int:
     """Return the number of audio tokens after CNN down‑sampling."""
-    return math.ceil(n_mel_frames / cnn_total_stride)
+    return math.ceil(n_mel_frames / (cnn_total_stride * compression_stride))
 
 
 # ---------------------------------------------------------------------------

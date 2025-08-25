@@ -2505,6 +2505,17 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
         self.audio_encoder = WhisperEncoder(whisper_cfg)
         self.audio_proj   = nn.Linear(whisper_cfg.d_model, config.hidden_size, bias=False)
 
+        # Add convolutional temporal compression
+        # Target: compress 1500 tokens to ~15-50 tokens (10-100x reduction)
+        self.audio_conv_compress = nn.Conv1d(
+            in_channels=config.hidden_size,
+            out_channels=config.hidden_size,
+            kernel_size=30,  # Aggregate info from 30 consecutive frames  
+            stride=30,       # 50x compression: 1500 -> 50 tokens
+            padding=0,
+            bias=False
+        )
+
         '''
         # ------------------- Whisper encoder -------------------
         whisper_model = WhisperModel.from_pretrained("openai/whisper-tiny")
@@ -2670,6 +2681,12 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
                     else whisper_out[0]
                 )                                                       # (B, T', d_model)
                 audio_embeds = self.audio_proj(audio_hidden)            # (B, T', hidden)
+
+                # Convolutional compression: 1500 -> 50 tokens
+                # Conv1d expects (B, C, T), but we have (B, T, C)
+                audio_embeds = audio_embeds.transpose(1, 2)             # (B, hidden, T')
+                audio_embeds = self.audio_conv_compress(audio_embeds)   # (B, hidden, T'/30)
+                audio_embeds = audio_embeds.transpose(1, 2)             # (B, T'/30, hidden)
 
                 '''
                 # flatten to (N_audio_tokens, hidden)
