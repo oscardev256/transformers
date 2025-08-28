@@ -2564,17 +2564,14 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
         whisper_cfg = WhisperConfig()
         self.audio_encoder = WhisperEncoder(whisper_cfg)
         
-        # Q-Former approach for audio compression: Linear → Q-Former
+        # Q-Former approach for audio compression (no separate linear projection)
         d_audio = whisper_cfg.d_model
         self.audio_num_queries = getattr(config, "audio_num_queries", 64)  # Default 64 queries
         
-        # Linear projection first: Whisper d_model → LLM hidden_size
-        self.audio_proj = nn.Linear(d_audio, config.hidden_size, bias=False)
-        
-        # Q-Former resampler operates in LLM hidden space
+        # Q-Former resampler handles both compression and dimension change
         self.audio_resampler = AudioQFormerResampler(
-            d_in=config.hidden_size,  # Input in LLM dimension
-            d_out=config.hidden_size,  # Output in same dimension
+            d_in=d_audio,             # Input: Whisper d_model (384)
+            d_out=config.hidden_size, # Output: LLM hidden_size (3584)
             k_tokens=self.audio_num_queries,
             n_heads=getattr(config, "audio_resampler_heads", 8),
             n_layers=getattr(config, "audio_resampler_layers", 2),
