@@ -2504,14 +2504,14 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
         whisper_cfg = WhisperConfig()
         self.audio_encoder = WhisperEncoder(whisper_cfg)
         
-        # Convolutional temporal compression first (on whisper features)
-        # Compress 1500 tokens to ~50 tokens before projection
+        # Convolutional processing without temporal compression
+        # Keep same number of tokens, just process features
         self.audio_conv_compress = nn.Conv1d(
             in_channels=whisper_cfg.d_model,    # Input: Whisper d_model (384 for tiny)
-            out_channels=whisper_cfg.d_model,   # Keep same dimension temporarily  
-            kernel_size=30,  # Aggregate info from 30 consecutive frames  
-            stride=30,       # 30x compression: 1500 -> 50 tokens
-            padding=0,
+            out_channels=whisper_cfg.d_model,   # Keep same dimension  
+            kernel_size=3,   # Small kernel for local feature processing  
+            stride=1,        # No temporal compression: T -> T tokens
+            padding=1,       # Keep same sequence length
             bias=False
         )
         
@@ -2683,14 +2683,14 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
                     else whisper_out[0]
                 )                                                       # (B, T', d_model)
                 
-                # Step 1: Convolutional compression first (1500 -> 50 tokens)
+                # Step 1: Convolutional feature processing (no temporal compression)
                 # Conv1d expects (B, C, T), but we have (B, T, C)
-                audio_compressed = audio_hidden.transpose(1, 2)         # (B, d_model, T')
-                audio_compressed = self.audio_conv_compress(audio_compressed)  # (B, d_model, T'/30)
-                audio_compressed = audio_compressed.transpose(1, 2)     # (B, T'/30, d_model)
+                audio_processed = audio_hidden.transpose(1, 2)          # (B, d_model, T')
+                audio_processed = self.audio_conv_compress(audio_processed)  # (B, d_model, T')
+                audio_processed = audio_processed.transpose(1, 2)       # (B, T', d_model)
                 
-                # Step 2: Linear projection after compression (fewer tokens)
-                audio_embeds = self.audio_proj(audio_compressed)        # (B, T'/30, hidden)
+                # Step 2: Linear projection after conv processing
+                audio_embeds = self.audio_proj(audio_processed)         # (B, T', hidden)
 
                 '''
                 # flatten to (N_audio_tokens, hidden)
