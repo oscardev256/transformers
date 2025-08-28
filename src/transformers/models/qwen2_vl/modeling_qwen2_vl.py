@@ -2742,13 +2742,10 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
                     else whisper_out[0]
                 )
                 
-                # Step 1: Linear projection first (Whisper d_model → LLM hidden_size)
-                audio_projected = self.audio_proj(audio_hidden)  # [B, T', hidden_size]
-                
-                # Step 2: Q-Former resampler → [B, K, hidden_size] 
+                # Q-Former resampler directly handles dimension change → [B, K, hidden_size] 
                 # (optional) padding mask for cross-attn (not provided here; add if you have lengths)
                 key_padding_mask = None  # shape [B, T'] with True=pad
-                audio_embeds = self.audio_resampler(audio_projected, key_padding_mask=key_padding_mask)
+                audio_embeds = self.audio_resampler(audio_hidden, key_padding_mask=key_padding_mask)
                 audio_embeds = audio_embeds.to(inputs_embeds.dtype)
                 
                 # ---- Robustly match whatever number of <audio_pad> tokens are in input_ids (per-sample) ----
