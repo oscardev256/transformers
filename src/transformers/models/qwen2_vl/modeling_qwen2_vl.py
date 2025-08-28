@@ -2564,20 +2564,21 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
         whisper_cfg = WhisperConfig()
         self.audio_encoder = WhisperEncoder(whisper_cfg)
         
-        # Q-Former approach for audio compression
+        # Q-Former approach for audio compression: Linear → Q-Former
         d_audio = whisper_cfg.d_model
         self.audio_num_queries = getattr(config, "audio_num_queries", 64)  # Default 64 queries
         
-        # Q-Former resampler with learnable queries - directly output LLM hidden size
+        # Linear projection first: Whisper d_model → LLM hidden_size
+        self.audio_proj = nn.Linear(d_audio, config.hidden_size, bias=False)
+        
+        # Q-Former resampler operates in LLM hidden space
         self.audio_resampler = AudioQFormerResampler(
-            d_in=d_audio,
-            d_out=config.hidden_size,  # Direct output to LLM dimension
+            d_in=config.hidden_size,  # Input in LLM dimension
+            d_out=config.hidden_size,  # Output in same dimension
             k_tokens=self.audio_num_queries,
             n_heads=getattr(config, "audio_resampler_heads", 8),
             n_layers=getattr(config, "audio_resampler_layers", 2),
         )
-        
-        # No separate linear projection needed - Q-Former handles dimension change
 
         '''
         # ------------------- Whisper encoder -------------------
@@ -2744,10 +2745,13 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
                     else whisper_out[0]
                 )
                 
-                # Q-Former resampler → [B, K, hidden_size] (directly outputs LLM dimension)
+                # Step 1: Linear projection first (Whisper d_model → LLM hidden_size)
+                audio_projected = self.audio_proj(audio_hidden)  # [B, T', hidden_size]
+                
+                # Step 2: Q-Former resampler → [B, K, hidden_size] 
                 # (optional) padding mask for cross-attn (not provided here; add if you have lengths)
                 key_padding_mask = None  # shape [B, T'] with True=pad
-                audio_embeds = self.audio_resampler(audio_hidden, key_padding_mask=key_padding_mask)
+                audio_embeds = self.audio_resampler(audio_projected, key_padding_mask=key_padding_mask)
                 audio_embeds = audio_embeds.to(inputs_embeds.dtype)
                 
                 # ---- Robustly match whatever number of <audio_pad> tokens are in input_ids (per-sample) ----
