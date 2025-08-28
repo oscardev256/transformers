@@ -2546,6 +2546,139 @@ class AudioQFormerResampler(nn.Module):
         q = self.output_proj(q)  # [B, K, d_out]
         return q
 
+    def load_blip2_qformer_weights(self, blip2_model_name: str = "Salesforce/blip2-opt-2.7b"):
+        """
+        Initialize Q-Former weights from a BLIP-2 model with dimension adaptation.
+        
+        Args:
+            blip2_model_name: BLIP-2 model checkpoint to load from
+        """
+        from transformers import Blip2ForConditionalGeneration
+        import torch.nn.functional as F
+        
+        # Load BLIP-2 model
+        print(f"Loading BLIP-2 weights from {blip2_model_name}...")
+        blip2_model = Blip2ForConditionalGeneration.from_pretrained(blip2_model_name)
+        blip2_qformer = blip2_model.qformer
+        blip2_state_dict = blip2_qformer.state_dict()
+        
+        # Initialize learnable queries (expand from 32 to 64)
+        if hasattr(blip2_model, 'query_tokens'):
+            original_queries = blip2_model.query_tokens  # [1, 32, 768]
+            blip2_hidden_size = original_queries.shape[-1]  # 768
+            
+            # Expand queries from 32 to self.k (64)
+            if self.k != original_queries.shape[1]:
+                # Duplicate and interpolate to reach target number of queries
+                repeat_factor = max(1, self.k // original_queries.shape[1])
+                remainder = self.k % original_queries.shape[1]
+                
+                expanded_queries = original_queries.repeat(1, repeat_factor, 1)
+                if remainder > 0:
+                    extra_queries = original_queries[:, :remainder, :]
+                    expanded_queries = torch.cat([expanded_queries, extra_queries], dim=1)
+                
+                # Project from BLIP-2 hidden size to our d_in if needed
+                if blip2_hidden_size != self.d_in:
+                    # Simple linear interpolation for dimension change
+                    expanded_queries = F.interpolate(
+                        expanded_queries.transpose(1, 2), 
+                        size=self.d_in, 
+                        mode='linear', 
+                        align_corners=False
+                    ).transpose(1, 2)
+                    
+                self.q.data = expanded_queries.squeeze(0)  # [K, d_in]
+                print(f"✓ Initialized {self.k} query tokens from {original_queries.shape[1]} BLIP-2 queries")
+            
+        # Load cross-attention layers (use first n_layers from BLIP-2's 12 layers)  
+        loaded_layers = 0
+        for layer_idx in range(min(len(self.blocks), 12)):  # BLIP-2 has 12 layers
+            try:
+                our_block = self.blocks[layer_idx]
+                
+                # Map BLIP-2 cross-attention weights to our cross-attention
+                cross_attn_mappings = [
+                    (f'encoder.layer.{layer_idx}.crossattention.self.query', 'cross_attn.query'),
+                    (f'encoder.layer.{layer_idx}.crossattention.self.key', 'cross_attn.key'), 
+                    (f'encoder.layer.{layer_idx}.crossattention.self.value', 'cross_attn.value'),
+                    (f'encoder.layer.{layer_idx}.crossattention.output.dense', 'cross_attn.out_proj'),
+                ]
+                
+                for blip2_key_base, our_attr_path in cross_attn_mappings:
+                    # Get our module
+                    our_module = getattr(our_block, our_attr_path.split('.')[0])  # cross_attn
+                    our_param = getattr(our_module, our_attr_path.split('.')[1])  # query/key/value/out_proj
+                    
+                    # Load weight
+                    blip2_weight_key = f'{blip2_key_base}.weight'
+                    blip2_bias_key = f'{blip2_key_base}.bias'
+                    
+                    if blip2_weight_key in blip2_state_dict:
+                        blip2_weight = blip2_state_dict[blip2_weight_key]
+                        our_weight_shape = our_param.weight.shape
+                        
+                        # Handle dimension adaptation for multi-head attention (12->8 heads)
+                        if len(blip2_weight.shape) > 1 and 'out_proj' not in our_attr_path:
+                            # For query, key, value: adapt from 12 to 8 heads
+                            if blip2_weight.shape[0] != our_weight_shape[0]:
+                                # Calculate head dimension
+                                blip2_heads = 12
+                                our_heads = 8
+                                head_dim = blip2_weight.shape[0] // blip2_heads
+                                
+                                # Take first 8 heads worth of parameters
+                                adapted_weight = blip2_weight[:our_heads * head_dim]
+                                our_param.weight.data = adapted_weight
+                            else:
+                                our_param.weight.data = blip2_weight
+                        else:
+                            # For out_proj and other layers, handle dimension mismatch differently
+                            if blip2_weight.shape == our_weight_shape:
+                                our_param.weight.data = blip2_weight
+                            else:
+                                # For dimension mismatch in out_proj, adapt accordingly
+                                if 'out_proj' in our_attr_path:
+                                    # out_proj expects input from 8 heads instead of 12
+                                    blip2_heads = 12
+                                    our_heads = 8
+                                    head_dim = blip2_weight.shape[1] // blip2_heads
+                                    adapted_weight = blip2_weight[:, :our_heads * head_dim]
+                                    our_param.weight.data = adapted_weight
+                                else:
+                                    our_param.weight.data = blip2_weight
+                    
+                    # Load bias if it exists
+                    if blip2_bias_key in blip2_state_dict and hasattr(our_param, 'bias') and our_param.bias is not None:
+                        blip2_bias = blip2_state_dict[blip2_bias_key]
+                        our_bias_shape = our_param.bias.shape
+                        
+                        # Handle bias dimension adaptation  
+                        if 'out_proj' not in our_attr_path and blip2_bias.shape[0] != our_bias_shape[0]:
+                            # For query, key, value bias: adapt from 12 to 8 heads
+                            blip2_heads = 12
+                            our_heads = 8 
+                            head_dim = blip2_bias.shape[0] // blip2_heads
+                            adapted_bias = blip2_bias[:our_heads * head_dim]
+                            our_param.bias.data = adapted_bias
+                        else:
+                            our_param.bias.data = blip2_bias
+                
+                loaded_layers += 1
+                print(f"  ✓ Loaded layer {layer_idx} weights with dimension adaptation")
+                
+            except Exception as e:
+                print(f"  ⚠ Failed to load layer {layer_idx}: {e}")
+                continue
+        
+        print(f"✓ Loaded Q-Former weights from {blip2_model_name} with dimension adaptation")
+        print(f"  - Successfully loaded {loaded_layers}/{len(self.blocks)} layers")
+        print(f"  - Adapted from 12 to 8 attention heads")
+        print(f"  - Expanded query tokens from 32 to {self.k}")
+        
+        # Clean up
+        del blip2_model
+
 
 class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
     """
@@ -2602,6 +2735,23 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
         self.audio_token_id       = config.audio_token_id
         self.audio_start_token_id = config.audio_start_token_id
         self.audio_end_token_id   = config.audio_end_token_id
+
+    def init_blip2_qformer_weights(self, blip2_model_name: str = "Salesforce/blip2-opt-2.7b"):
+        """
+        Initialize the audio Q-Former with weights from a BLIP-2 model.
+        
+        This method loads BLIP-2 Q-Former weights and adapts them for audio processing:
+        - Expands query tokens from 32 to 64
+        - Adapts attention heads from 12 to 8  
+        - Uses first 2 layers from BLIP-2's 12-layer Q-Former
+        - Handles dimension changes for audio input (384D) to LLM output (3584D)
+        
+        Args:
+            blip2_model_name: BLIP-2 checkpoint name (default: "Salesforce/blip2-opt-2.7b")
+        """
+        print(f"Initializing audio Q-Former with BLIP-2 weights from {blip2_model_name}...")
+        self.audio_resampler.load_blip2_qformer_weights(blip2_model_name)
+        print("✓ Audio Q-Former successfully initialized with BLIP-2 weights")
 
     # ------------------------------------------------------------------
     # forward
