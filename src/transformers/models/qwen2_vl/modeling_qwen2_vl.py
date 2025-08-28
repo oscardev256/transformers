@@ -2507,6 +2507,13 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
 
         # Convolutional temporal compression with group convolution (30x compression)
         # Target: compress 1500 tokens to ~50 tokens (30x reduction)
+        
+        # Option 1: Set group size equal to hidden_size (equivalent to regular convolution)
+        group_size = config.hidden_size
+        print(f"Audio conv groups: {group_size} (equivalent to regular conv), hidden_size={config.hidden_size}")
+        
+        # Option 2: Group size H/100 (commented out for reference)
+        '''
         # Find closest divisor to H/100 for group convolution
         target_group_size = config.hidden_size // 100  # ~35 for 3584
         
@@ -2521,6 +2528,7 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
         # Find closest divisor to target
         group_size = min(divisors, key=lambda x: abs(x - target_group_size))
         print(f"Audio conv groups: target={target_group_size}, actual={group_size}, hidden_size={config.hidden_size}")
+        '''
         self.audio_conv_compress = nn.Conv1d(
             in_channels=config.hidden_size,     # Input: after linear projection
             out_channels=config.hidden_size,    # Keep hidden dimension  
