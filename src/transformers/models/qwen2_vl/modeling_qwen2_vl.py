@@ -2708,20 +2708,23 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
                 audio_mels = None  # Skip processing if no placeholder exists
 
             if audio_mels is not None:
-                # (B, 80, T) or (B, T, 80) → ensure shape = (B, T, 80)
+                # Whisper encoder expects (B, 80, T) not (B, T, 80)
                 if audio_mels.dim() != 3:
                     raise ValueError("`audio_mels` must be 3-D (B, 80, T) or (B, T, 80)")
+                    
                 if audio_mels.shape[1] == 80:
-                    # typical Whisper API returns (B, 80, T)
+                    # Already (B, 80, T) - correct for Whisper
+                    audio_feats = audio_mels
+                elif audio_mels.shape[2] == 80:
+                    # Need to transpose from (B, T, 80) to (B, 80, T)
                     audio_feats = audio_mels.transpose(1, 2).contiguous()
                 else:
-                    # already (B, T, 80)
-                    audio_feats = audio_mels
+                    raise ValueError(f"Expected 80 mel channels, got shape: {audio_mels.shape}")
                 
                 # Use bf16 for better performance on modern GPUs
                 audio_feats = audio_feats.to(dtype=torch.bfloat16)
                 
-                # Whisper encoder → [B, T', d_audio]
+                # Whisper encoder expects (B, 80, T) → [B, T', d_audio]
                 whisper_out = self.audio_encoder(audio_feats)
                 audio_hidden = (
                     whisper_out.last_hidden_state 
