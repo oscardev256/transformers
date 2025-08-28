@@ -2518,21 +2518,33 @@ class _CrossAttnBlock(nn.Module):
 class AudioQFormerResampler(nn.Module):
     """
     Fixed-K learnable queries that cross-attend to audio encoder frames.
-    Output: [B, K, d_in]
+    Output: [B, K, d_out]
     """
-    def __init__(self, d_in: int, k_tokens: int = 64, n_heads: int = 8, n_layers: int = 2):
+    def __init__(self, d_in: int, d_out: int = None, k_tokens: int = 64, n_heads: int = 8, n_layers: int = 2):
         super().__init__()
         self.k = k_tokens
+        self.d_in = d_in
+        self.d_out = d_out if d_out is not None else d_in
+        
+        # Learnable queries in input dimension
         self.q = nn.Parameter(torch.randn(k_tokens, d_in) / (d_in ** 0.5))
         self.blocks = nn.ModuleList([_CrossAttnBlock(d_in, n_heads) for _ in range(n_layers)])
+        
+        # Final projection to output dimension if different
+        if self.d_out != d_in:
+            self.output_proj = nn.Linear(d_in, self.d_out, bias=False)
+        else:
+            self.output_proj = nn.Identity()
 
     def forward(self, x: torch.Tensor, key_padding_mask: Optional[torch.Tensor] = None):
         # x: [B, T, d_in], key_padding_mask: [B, T] (True = pad), optional
         B, T, D = x.shape
-        q = self.q.unsqueeze(0).expand(B, self.k, D)  # [B, K, D]
+        q = self.q.unsqueeze(0).expand(B, self.k, D)  # [B, K, d_in]
         for blk in self.blocks:
             q = blk(q, x, key_padding_mask=key_padding_mask)
-        return q  # [B, K, D]
+        # Project to output dimension
+        q = self.output_proj(q)  # [B, K, d_out]
+        return q
 
 
 class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
@@ -2556,16 +2568,16 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
         d_audio = whisper_cfg.d_model
         self.audio_num_queries = getattr(config, "audio_num_queries", 64)  # Default 64 queries
         
-        # Q-Former resampler with learnable queries
+        # Q-Former resampler with learnable queries - directly output LLM hidden size
         self.audio_resampler = AudioQFormerResampler(
             d_in=d_audio,
+            d_out=config.hidden_size,  # Direct output to LLM dimension
             k_tokens=self.audio_num_queries,
             n_heads=getattr(config, "audio_resampler_heads", 8),
             n_layers=getattr(config, "audio_resampler_layers", 2),
         )
         
-        # Linear projection to LLM hidden size
-        self.audio_proj = nn.Linear(d_audio, config.hidden_size, bias=False)
+        # No separate linear projection needed - Q-Former handles dimension change
 
         '''
         # ------------------- Whisper encoder -------------------
@@ -2732,13 +2744,11 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
                     else whisper_out[0]
                 )
                 
-                # Q-Former resampler → [B, K, d_audio]
+                # Q-Former resampler → [B, K, hidden_size] (directly outputs LLM dimension)
                 # (optional) padding mask for cross-attn (not provided here; add if you have lengths)
                 key_padding_mask = None  # shape [B, T'] with True=pad
-                q_tokens = self.audio_resampler(audio_hidden, key_padding_mask=key_padding_mask)
-                
-                # Project to LLM hidden → [B, K, hidden]
-                audio_embeds = self.audio_proj(q_tokens).to(inputs_embeds.dtype)
+                audio_embeds = self.audio_resampler(audio_hidden, key_padding_mask=key_padding_mask)
+                audio_embeds = audio_embeds.to(inputs_embeds.dtype)
                 
                 # ---- Robustly match whatever number of <audio_pad> tokens are in input_ids (per-sample) ----
                 audio_mask = (input_ids == self.audio_token_id)        # [B, S]
