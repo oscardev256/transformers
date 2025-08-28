@@ -2505,14 +2505,17 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
         self.audio_encoder = WhisperEncoder(whisper_cfg)
         self.audio_proj = nn.Linear(whisper_cfg.d_model, config.hidden_size, bias=False)
 
-        # Convolutional temporal compression after linear projection (30x compression)
+        # Convolutional temporal compression with group convolution (30x compression)
         # Target: compress 1500 tokens to ~50 tokens (30x reduction)
+        # Group size = H/100 where H is hidden dimension
+        group_size = config.hidden_size // 100
         self.audio_conv_compress = nn.Conv1d(
             in_channels=config.hidden_size,     # Input: after linear projection
             out_channels=config.hidden_size,    # Keep hidden dimension  
             kernel_size=30,  # Aggregate info from 30 consecutive frames  
             stride=30,       # 30x compression: 1500 -> 50 tokens
             padding=0,       # No padding for clean compression
+            groups=group_size,  # Group convolution: H/100 groups
             bias=False
         )
 
