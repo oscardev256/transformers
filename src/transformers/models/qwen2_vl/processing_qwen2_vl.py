@@ -274,10 +274,25 @@ def _waveform_to_logmel(wav: np.ndarray) -> Tuple[np.ndarray, int]:
     return mel.cpu().numpy(), mel.shape[-1]
 
 
-def compute_audio_pad_count(n_mel_frames: int, cnn_total_stride: int = 2, compression_stride: int = 30) -> int:
-    """Return the number of audio tokens after CNN down‑sampling and 30x compression."""
-    # Whisper CNN downsampling + conv layer 30x compression
-    return math.ceil(n_mel_frames / (cnn_total_stride * compression_stride))
+def compute_audio_pad_count(n_mel_frames: int = None, use_qformer: bool = True, num_queries: int = 64) -> int:
+    """Return the number of audio tokens based on compression method.
+    
+    Args:
+        n_mel_frames: Number of mel frames (unused for Q-Former)
+        use_qformer: If True, return fixed num_queries. If False, use conv compression.
+        num_queries: Fixed number of Q-Former queries (default 64)
+    
+    Returns:
+        Number of audio tokens to insert
+    """
+    if use_qformer:
+        # Q-Former always outputs fixed number of tokens regardless of input length
+        return num_queries
+    else:
+        # Legacy conv compression: Whisper CNN (2x) + conv (30x) = 60x total
+        cnn_total_stride = 2
+        compression_stride = 30
+        return math.ceil(n_mel_frames / (cnn_total_stride * compression_stride))
 
 
 # ---------------------------------------------------------------------------
@@ -372,7 +387,8 @@ class Qwen2VLProcessor(ProcessorMixin):
                 wav_np = _ensure_16k(wav_np, sr)
                 mel, n_frames = _waveform_to_logmel(wav_np)
                 mel_list.append(mel)
-                token_counts.append(compute_audio_pad_count(n_frames, self.cnn_total_stride))
+                # Use Q-Former with fixed token count
+                token_counts.append(compute_audio_pad_count(n_frames, use_qformer=True, num_queries=64))
             audio_mels = np.stack(mel_list, axis=0)  # (B, 80, T)
         else:
             audio_mels, token_counts = None, None
