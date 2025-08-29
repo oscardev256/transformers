@@ -2620,12 +2620,18 @@ class AudioQFormerResampler(nn.Module):
                     blip2_v_weight = blip2_state_dict[blip2_value_key]  # [768*12, 1408]
                     
                     
-                    # Take first 8 heads and resize
-                    adapted_q = blip2_q_weight[:our_heads * blip2_head_dim, :our_head_dim * our_heads]  # [8*64, 8*48]
-                    adapted_k = blip2_k_weight[:our_heads * blip2_head_dim, :our_head_dim * our_heads]  
-                    adapted_v = blip2_v_weight[:our_heads * blip2_head_dim, :our_head_dim * our_heads]
+                    # Take first 8 heads from 12 heads (rows) and keep full feature dimension (cols)
+                    adapted_q = blip2_q_weight[:our_heads * blip2_head_dim, :]  # [8*64, full_dim]
+                    adapted_k = blip2_k_weight[:our_heads * blip2_head_dim, :]  
+                    adapted_v = blip2_v_weight[:our_heads * blip2_head_dim, :]
                     
-                    # Concatenate for MultiheadAttention in_proj_weight format
+                    # Resize feature dimension if needed (768 -> 384)
+                    if adapted_q.shape[1] != self.d_in:
+                        adapted_q = adapted_q[:, :self.d_in]
+                        adapted_k = adapted_k[:, :self.d_in] 
+                        adapted_v = adapted_v[:, :self.d_in]
+                    
+                    # Concatenate for MultiheadAttention in_proj_weight format  
                     our_in_proj_weight = torch.cat([adapted_q, adapted_k, adapted_v], dim=0)
                     our_block.attn.in_proj_weight.data = our_in_proj_weight
                     
@@ -2635,9 +2641,9 @@ class AudioQFormerResampler(nn.Module):
                         blip2_k_bias = blip2_state_dict[blip2_key_bias_key] 
                         blip2_v_bias = blip2_state_dict[blip2_value_bias_key]
                         
-                        adapted_q_bias = blip2_q_bias[:our_heads * blip2_head_dim]
-                        adapted_k_bias = blip2_k_bias[:our_heads * blip2_head_dim]
-                        adapted_v_bias = blip2_v_bias[:our_heads * blip2_head_dim]
+                        adapted_q_bias = blip2_q_bias[:our_heads * our_head_dim]
+                        adapted_k_bias = blip2_k_bias[:our_heads * our_head_dim]
+                        adapted_v_bias = blip2_v_bias[:our_heads * our_head_dim]
                         
                         our_in_proj_bias = torch.cat([adapted_q_bias, adapted_k_bias, adapted_v_bias], dim=0)
                         our_block.attn.in_proj_bias.data = our_in_proj_bias
@@ -2647,14 +2653,21 @@ class AudioQFormerResampler(nn.Module):
                 blip2_out_bias_key = f'encoder.layer.{layer_idx}.crossattention.output.dense.bias'
                 
                 if blip2_out_key in blip2_state_dict:
-                    blip2_out_weight = blip2_state_dict[blip2_out_key]
-                    # Adapt dimensions: input from 8 heads instead of 12
-                    adapted_out_weight = blip2_out_weight[:, :our_heads * blip2_head_dim]
-                    our_block.attn.out_proj.weight.data = adapted_out_weight[:our_heads * our_head_dim, :]
+                    blip2_out_weight = blip2_state_dict[blip2_out_key]  # [768, 768]
+                    # For output projection: [out_features, in_features]
+                    # Input features: from concatenated attention output (8 heads * 48 dim = 384)
+                    # Output features: should match our model's hidden size (384)
+                    
+                    target_in_features = our_heads * our_head_dim  # 8 * 48 = 384
+                    target_out_features = self.d_in  # 384
+                    
+                    # Adapt the weight matrix
+                    adapted_out_weight = blip2_out_weight[:target_out_features, :target_in_features]
+                    our_block.attn.out_proj.weight.data = adapted_out_weight
                     
                     if blip2_out_bias_key in blip2_state_dict:
                         blip2_out_bias = blip2_state_dict[blip2_out_bias_key] 
-                        our_block.attn.out_proj.bias.data = blip2_out_bias[:our_heads * our_head_dim]
+                        our_block.attn.out_proj.bias.data = blip2_out_bias[:target_out_features]
                 
                 loaded_layers += 1
                 print(f"  ✓ Loaded layer {layer_idx} weights with dimension adaptation")
