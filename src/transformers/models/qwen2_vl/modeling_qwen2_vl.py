@@ -2504,27 +2504,10 @@ class _CrossAttnBlock(nn.Module):
             nn.Linear(hidden, d_model),
         )
         
-        # Better initialization for training stability
-        self._init_weights()
-
-    def _init_weights(self):
-        """Initialize weights for training stability"""
-        # Initialize MLP weights
-        for module in self.mlp:
-            if isinstance(module, nn.Linear):
-                nn.init.xavier_uniform_(module.weight)
-                if module.bias is not None:
-                    nn.init.constant_(module.bias, 0)
     
     def _initialize_weights(self, module):
-        """Required by Transformers initialization system"""
-        if isinstance(module, nn.Linear):
-            nn.init.xavier_uniform_(module.weight)
-            if module.bias is not None:
-                nn.init.constant_(module.bias, 0)
-        elif isinstance(module, nn.LayerNorm):
-            nn.init.constant_(module.bias, 0)
-            nn.init.constant_(module.weight, 1.0)
+        """Required by Transformers initialization system - use defaults"""
+        pass  # Let PyTorch use default initialization
 
     def forward(self, q: torch.Tensor, x: torch.Tensor, key_padding_mask=None):
         # True cross-attention: queries attend to encoder frames (keys/values = x)
@@ -2548,16 +2531,16 @@ class AudioQFormerResampler(nn.Module):
         self.d_in = d_in
         self.d_out = d_out if d_out is not None else d_in
         
-        # Learnable queries with proper initialization
-        self.q = nn.Parameter(torch.zeros(k_tokens, d_in))
-        nn.init.xavier_uniform_(self.q)
+        # Learnable queries with default PyTorch initialization (like nn.Linear)
+        self.q = nn.Parameter(torch.empty(k_tokens, d_in))
+        bound = 1 / math.sqrt(d_in)
+        nn.init.uniform_(self.q, -bound, bound)
         
         self.blocks = nn.ModuleList([_CrossAttnBlock(d_in, n_heads) for _ in range(n_layers)])
         
-        # Final projection to output dimension if different
+        # Final projection to output dimension if different (uses default nn.Linear init)
         if self.d_out != d_in:
             self.output_proj = nn.Linear(d_in, self.d_out, bias=False)
-            nn.init.xavier_uniform_(self.output_proj.weight)
         else:
             self.output_proj = nn.Identity()
         
@@ -2565,14 +2548,8 @@ class AudioQFormerResampler(nn.Module):
         print(f"  Input: {d_in}D → Output: {self.d_out}D")
 
     def _initialize_weights(self, module):
-        """Required by Transformers initialization system"""
-        if isinstance(module, nn.Linear):
-            nn.init.xavier_uniform_(module.weight)
-            if module.bias is not None:
-                nn.init.constant_(module.bias, 0)
-        elif isinstance(module, nn.Parameter):
-            if module.dim() > 1:
-                nn.init.xavier_uniform_(module)
+        """Required by Transformers initialization system - use defaults"""
+        pass  # Let PyTorch use default initialization
 
     def forward(self, x: torch.Tensor, key_padding_mask: Optional[torch.Tensor] = None):
         # x: [B, T, d_in], key_padding_mask: [B, T] (True = pad), optional
