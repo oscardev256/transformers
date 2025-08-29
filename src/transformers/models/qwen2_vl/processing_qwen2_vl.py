@@ -327,7 +327,7 @@ class Qwen2VLProcessor(ProcessorMixin):
     # ---------------------------------------------------------------------
     # 0) init
     # ---------------------------------------------------------------------
-    def __init__(self, image_processor=None, tokenizer=None, chat_template=None, **kwargs):
+    def __init__(self, image_processor=None, tokenizer=None, chat_template=None, use_qformer=True, **kwargs):
         # vision placeholders (same hasattr pattern as original code)
         self.image_token = (
             "<|image_pad|>" if not hasattr(tokenizer, "image_token") else tokenizer.image_token
@@ -343,6 +343,7 @@ class Qwen2VLProcessor(ProcessorMixin):
         # audio‑to‑token mapping parameters
         self.hop_length = 160        # 10 ms @16 kHz
         self.cnn_total_stride = 2     # ×4 down‑sampling (Whisper "large" family)
+        self.use_qformer = use_qformer
 
         super().__init__(image_processor, tokenizer, chat_template=chat_template)
 
@@ -388,7 +389,7 @@ class Qwen2VLProcessor(ProcessorMixin):
                 mel, n_frames = _waveform_to_logmel(wav_np)
                 mel_list.append(mel)
                 # Use Q-Former with fixed token count
-                token_counts.append(compute_audio_pad_count(n_frames, use_qformer=True, num_queries=64))
+                token_counts.append(compute_audio_pad_count(n_frames, use_qformer=self.use_qformer, num_queries=64))
             audio_mels = np.stack(mel_list, axis=0)  # (B, 80, T)
         else:
             audio_mels, token_counts = None, None
