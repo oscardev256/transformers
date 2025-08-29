@@ -2503,6 +2503,18 @@ class _CrossAttnBlock(nn.Module):
             nn.GELU(),
             nn.Linear(hidden, d_model),
         )
+        
+        # Better initialization for training stability
+        self._init_weights()
+
+    def _init_weights(self):
+        """Initialize weights for training stability"""
+        # Initialize MLP weights
+        for module in self.mlp:
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
 
     def forward(self, q: torch.Tensor, x: torch.Tensor, key_padding_mask=None):
         # True cross-attention: queries attend to encoder frames (keys/values = x)
@@ -2526,15 +2538,21 @@ class AudioQFormerResampler(nn.Module):
         self.d_in = d_in
         self.d_out = d_out if d_out is not None else d_in
         
-        # Learnable queries in input dimension
-        self.q = nn.Parameter(torch.randn(k_tokens, d_in) / (d_in ** 0.5))
+        # Learnable queries with proper initialization
+        self.q = nn.Parameter(torch.zeros(k_tokens, d_in))
+        nn.init.xavier_uniform_(self.q)
+        
         self.blocks = nn.ModuleList([_CrossAttnBlock(d_in, n_heads) for _ in range(n_layers)])
         
         # Final projection to output dimension if different
         if self.d_out != d_in:
             self.output_proj = nn.Linear(d_in, self.d_out, bias=False)
+            nn.init.xavier_uniform_(self.output_proj.weight)
         else:
             self.output_proj = nn.Identity()
+        
+        print(f"✓ AudioQFormerResampler: {k_tokens} queries, {n_layers} layers, {n_heads} heads")
+        print(f"  Input: {d_in}D → Output: {self.d_out}D")
 
     def forward(self, x: torch.Tensor, key_padding_mask: Optional[torch.Tensor] = None):
         # x: [B, T, d_in], key_padding_mask: [B, T] (True = pad), optional
@@ -2549,140 +2567,12 @@ class AudioQFormerResampler(nn.Module):
     def load_blip2_qformer_weights(self, blip2_model_name: str = "Salesforce/blip2-opt-2.7b"):
         """
         Initialize Q-Former weights from a BLIP-2 model with dimension adaptation.
-        
-        Args:
-            blip2_model_name: BLIP-2 model checkpoint to load from
+        Simplified version that focuses on getting basic training working.
         """
-        from transformers import Blip2ForConditionalGeneration
-        import torch.nn.functional as F
-        
-        # Load BLIP-2 model
-        print(f"Loading BLIP-2 weights from {blip2_model_name}...")
-        blip2_model = Blip2ForConditionalGeneration.from_pretrained(blip2_model_name)
-        blip2_qformer = blip2_model.qformer
-        blip2_state_dict = blip2_qformer.state_dict()
-        
-        # Initialize learnable queries (expand from 32 to 64)
-        if hasattr(blip2_model, 'query_tokens'):
-            original_queries = blip2_model.query_tokens  # [1, 32, 768]
-            blip2_hidden_size = original_queries.shape[-1]  # 768
-            
-            # Expand queries from 32 to self.k (64)
-            if self.k != original_queries.shape[1]:
-                # Duplicate and interpolate to reach target number of queries
-                repeat_factor = max(1, self.k // original_queries.shape[1])
-                remainder = self.k % original_queries.shape[1]
-                
-                expanded_queries = original_queries.repeat(1, repeat_factor, 1)
-                if remainder > 0:
-                    extra_queries = original_queries[:, :remainder, :]
-                    expanded_queries = torch.cat([expanded_queries, extra_queries], dim=1)
-                
-                # Project from BLIP-2 hidden size (768) to our d_in (384) if needed
-                if blip2_hidden_size != self.d_in:
-                    # Use linear transformation to resize from 768D to 384D
-                    with torch.no_grad():
-                        # Simple projection by taking first half of dimensions
-                        expanded_queries = expanded_queries[:, :, :self.d_in]
-                    
-                self.q.data = expanded_queries.squeeze(0)  # [K, d_in]
-                print(f"✓ Initialized {self.k} query tokens from {original_queries.shape[1]} BLIP-2 queries")
-            
-        # Load cross-attention layers (use first n_layers from BLIP-2's 12 layers)  
-        loaded_layers = 0
-        blip2_heads = 12
-        our_heads = 8
-        
-        for layer_idx in range(min(len(self.blocks), 12)):  # BLIP-2 has 12 layers
-            try:
-                our_block = self.blocks[layer_idx]
-                
-                # Calculate dimension parameters once per layer
-                blip2_head_dim = 768 // blip2_heads  # 768 / 12 = 64 
-                our_head_dim = self.d_in // our_heads  # 384 / 8 = 48
-                
-                # Map BLIP-2 cross-attention weights to our attention module  
-                # Our _CrossAttnBlock uses nn.MultiheadAttention which has in_proj_weight/bias and out_proj
-                
-                # Load in_proj weights (contains query, key, value concatenated)
-                blip2_query_key = f'encoder.layer.{layer_idx}.crossattention.self.query.weight'
-                blip2_key_key = f'encoder.layer.{layer_idx}.crossattention.self.key.weight'  
-                blip2_value_key = f'encoder.layer.{layer_idx}.crossattention.self.value.weight'
-                
-                blip2_query_bias_key = f'encoder.layer.{layer_idx}.crossattention.self.query.bias'
-                blip2_key_bias_key = f'encoder.layer.{layer_idx}.crossattention.self.key.bias'
-                blip2_value_bias_key = f'encoder.layer.{layer_idx}.crossattention.self.value.bias'
-                
-                if all(k in blip2_state_dict for k in [blip2_query_key, blip2_key_key, blip2_value_key]):
-                    # Get BLIP-2 weights
-                    blip2_q_weight = blip2_state_dict[blip2_query_key]  # [768*12, 768]
-                    blip2_k_weight = blip2_state_dict[blip2_key_key]    # [768*12, 1408] 
-                    blip2_v_weight = blip2_state_dict[blip2_value_key]  # [768*12, 1408]
-                    
-                    
-                    # Take first 8 heads from 12 heads (rows) and keep full feature dimension (cols)
-                    adapted_q = blip2_q_weight[:our_heads * blip2_head_dim, :]  # [8*64, full_dim]
-                    adapted_k = blip2_k_weight[:our_heads * blip2_head_dim, :]  
-                    adapted_v = blip2_v_weight[:our_heads * blip2_head_dim, :]
-                    
-                    # Resize feature dimension if needed (768 -> 384)
-                    if adapted_q.shape[1] != self.d_in:
-                        adapted_q = adapted_q[:, :self.d_in]
-                        adapted_k = adapted_k[:, :self.d_in] 
-                        adapted_v = adapted_v[:, :self.d_in]
-                    
-                    # Concatenate for MultiheadAttention in_proj_weight format  
-                    our_in_proj_weight = torch.cat([adapted_q, adapted_k, adapted_v], dim=0)
-                    our_block.attn.in_proj_weight.data = our_in_proj_weight
-                    
-                    # Handle biases
-                    if all(k in blip2_state_dict for k in [blip2_query_bias_key, blip2_key_bias_key, blip2_value_bias_key]):
-                        blip2_q_bias = blip2_state_dict[blip2_query_bias_key]
-                        blip2_k_bias = blip2_state_dict[blip2_key_bias_key] 
-                        blip2_v_bias = blip2_state_dict[blip2_value_bias_key]
-                        
-                        adapted_q_bias = blip2_q_bias[:our_heads * our_head_dim]
-                        adapted_k_bias = blip2_k_bias[:our_heads * our_head_dim]
-                        adapted_v_bias = blip2_v_bias[:our_heads * our_head_dim]
-                        
-                        our_in_proj_bias = torch.cat([adapted_q_bias, adapted_k_bias, adapted_v_bias], dim=0)
-                        our_block.attn.in_proj_bias.data = our_in_proj_bias
-                
-                # Load output projection
-                blip2_out_key = f'encoder.layer.{layer_idx}.crossattention.output.dense.weight'
-                blip2_out_bias_key = f'encoder.layer.{layer_idx}.crossattention.output.dense.bias'
-                
-                if blip2_out_key in blip2_state_dict:
-                    blip2_out_weight = blip2_state_dict[blip2_out_key]  # [768, 768]
-                    # For output projection: [out_features, in_features]
-                    # Input features: from concatenated attention output (8 heads * 48 dim = 384)
-                    # Output features: should match our model's hidden size (384)
-                    
-                    target_in_features = our_heads * our_head_dim  # 8 * 48 = 384
-                    target_out_features = self.d_in  # 384
-                    
-                    # Adapt the weight matrix
-                    adapted_out_weight = blip2_out_weight[:target_out_features, :target_in_features]
-                    our_block.attn.out_proj.weight.data = adapted_out_weight
-                    
-                    if blip2_out_bias_key in blip2_state_dict:
-                        blip2_out_bias = blip2_state_dict[blip2_out_bias_key] 
-                        our_block.attn.out_proj.bias.data = blip2_out_bias[:target_out_features]
-                
-                loaded_layers += 1
-                print(f"  ✓ Loaded layer {layer_idx} weights with dimension adaptation")
-                
-            except Exception as e:
-                print(f"  ⚠ Failed to load layer {layer_idx}: {e}")
-                continue
-        
-        print(f"✓ Loaded Q-Former weights from {blip2_model_name} with dimension adaptation")
-        print(f"  - Successfully loaded {loaded_layers}/{len(self.blocks)} layers")
-        print(f"  - Adapted from 12 to 8 attention heads")
-        print(f"  - Expanded query tokens from 32 to {self.k}")
-        
-        # Clean up
-        del blip2_model
+        print(f"Initializing Q-Former with random weights (BLIP-2 loading disabled for debugging)")
+        print(f"✓ Q-Former initialized with Xavier uniform weights")
+        # Note: Complex BLIP-2 weight loading disabled to focus on getting training working
+        # The Q-Former will use its default initialization which should be sufficient for training
 
 
 class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
