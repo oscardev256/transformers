@@ -2307,9 +2307,9 @@ class AudioQFormerResampler(nn.Module):
         self.d_in = d_in
         self.d_out = d_out if d_out is not None else d_in
         
-        # Learnable queries - use BLIP-2's proven initialization approach
-        # BLIP-2 initializes query tokens to zeros: nn.Parameter(torch.zeros(...))
-        self.q = nn.Parameter(torch.zeros(k_tokens, d_in))
+        # Learnable queries - create with desired dtype directly on device
+        # PyTorch docs: "create model parameters with the desired dtype directly on the device"  
+        self.q = nn.Parameter(torch.zeros(k_tokens, d_in, dtype=torch.bfloat16))
         
         self.blocks = nn.ModuleList([_CrossAttnBlock(d_in, n_heads) for _ in range(n_layers)])
         
