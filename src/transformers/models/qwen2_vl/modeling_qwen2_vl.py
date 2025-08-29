@@ -2597,6 +2597,10 @@ class AudioQFormerResampler(nn.Module):
             try:
                 our_block = self.blocks[layer_idx]
                 
+                # Calculate dimension parameters once per layer
+                blip2_head_dim = 768 // blip2_heads  # 768 / 12 = 64 
+                our_head_dim = self.d_in // our_heads  # 384 / 8 = 48
+                
                 # Map BLIP-2 cross-attention weights to our attention module  
                 # Our _CrossAttnBlock uses nn.MultiheadAttention which has in_proj_weight/bias and out_proj
                 
@@ -2615,9 +2619,6 @@ class AudioQFormerResampler(nn.Module):
                     blip2_k_weight = blip2_state_dict[blip2_key_key]    # [768*12, 1408] 
                     blip2_v_weight = blip2_state_dict[blip2_value_key]  # [768*12, 1408]
                     
-                    # Adapt dimensions: 12 heads -> 8 heads, 768 -> 384 hidden
-                    blip2_head_dim = blip2_q_weight.shape[0] // blip2_heads  # 768 / 12 = 64
-                    our_head_dim = self.d_in // our_heads  # 384 / 8 = 48
                     
                     # Take first 8 heads and resize
                     adapted_q = blip2_q_weight[:our_heads * blip2_head_dim, :our_head_dim * our_heads]  # [8*64, 8*48]
