@@ -2307,12 +2307,10 @@ class AudioQFormerResampler(nn.Module):
         self.d_in = d_in
         self.d_out = d_out if d_out is not None else d_in
         
-        # Learnable queries - use same initialization as nn.Linear for consistency
-        self.q = nn.Parameter(torch.empty(k_tokens, d_in))
-        # Initialize using the same method as nn.Linear
-        with torch.no_grad():
-            bound = 1 / math.sqrt(d_in) 
-            self.q.uniform_(-bound, bound)
+        # Learnable queries - avoid torch.empty with bfloat16 due to PyTorch bug #124719
+        # Use randn with proper scaling (same as nn.Linear default)
+        bound = 1 / math.sqrt(d_in)
+        self.q = nn.Parameter(torch.randn(k_tokens, d_in) * bound)
         
         self.blocks = nn.ModuleList([_CrossAttnBlock(d_in, n_heads) for _ in range(n_layers)])
         
