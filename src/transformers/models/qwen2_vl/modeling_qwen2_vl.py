@@ -2515,6 +2515,16 @@ class _CrossAttnBlock(nn.Module):
                 nn.init.xavier_uniform_(module.weight)
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0)
+    
+    def _initialize_weights(self, module):
+        """Required by Transformers initialization system"""
+        if isinstance(module, nn.Linear):
+            nn.init.xavier_uniform_(module.weight)
+            if module.bias is not None:
+                nn.init.constant_(module.bias, 0)
+        elif isinstance(module, nn.LayerNorm):
+            nn.init.constant_(module.bias, 0)
+            nn.init.constant_(module.weight, 1.0)
 
     def forward(self, q: torch.Tensor, x: torch.Tensor, key_padding_mask=None):
         # True cross-attention: queries attend to encoder frames (keys/values = x)
@@ -2553,6 +2563,16 @@ class AudioQFormerResampler(nn.Module):
         
         print(f"✓ AudioQFormerResampler: {k_tokens} queries, {n_layers} layers, {n_heads} heads")
         print(f"  Input: {d_in}D → Output: {self.d_out}D")
+
+    def _initialize_weights(self, module):
+        """Required by Transformers initialization system"""
+        if isinstance(module, nn.Linear):
+            nn.init.xavier_uniform_(module.weight)
+            if module.bias is not None:
+                nn.init.constant_(module.bias, 0)
+        elif isinstance(module, nn.Parameter):
+            if module.dim() > 1:
+                nn.init.xavier_uniform_(module)
 
     def forward(self, x: torch.Tensor, key_padding_mask: Optional[torch.Tensor] = None):
         # x: [B, T, d_in], key_padding_mask: [B, T] (True = pad), optional
