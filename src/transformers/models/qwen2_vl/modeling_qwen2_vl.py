@@ -2618,7 +2618,7 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
         if use_qformer:
             # Q-Former approach for audio compression 
             d_audio = whisper_cfg.d_model
-            self.audio_num_queries = getattr(config, "audio_num_queries", 64)
+            self.audio_num_queries = getattr(config, "audio_num_queries", 256)
             
             self.audio_proj = AudioQFormerResampler(
                 d_in=d_audio,             # Input: Whisper d_model (384)

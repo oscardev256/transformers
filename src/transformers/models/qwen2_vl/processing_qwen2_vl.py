@@ -389,7 +389,7 @@ class Qwen2VLProcessor(ProcessorMixin):
                 mel, n_frames = _waveform_to_logmel(wav_np)
                 mel_list.append(mel)
                 # Use Q-Former with fixed token count
-                token_counts.append(compute_audio_pad_count(n_frames, use_qformer=self.use_qformer, num_queries=64))
+                token_counts.append(compute_audio_pad_count(n_frames, use_qformer=self.use_qformer, num_queries=256))
             audio_mels = np.stack(mel_list, axis=0)  # (B, 80, T)
         else:
             audio_mels, token_counts = None, None
