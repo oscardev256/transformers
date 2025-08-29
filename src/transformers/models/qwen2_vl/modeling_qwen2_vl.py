@@ -2503,11 +2503,6 @@ class _CrossAttnBlock(nn.Module):
             nn.GELU(),
             nn.Linear(hidden, d_model),
         )
-        
-    
-    def _initialize_weights(self, module):
-        """Required by Transformers initialization system - use defaults"""
-        pass  # Let PyTorch use default initialization
 
     def forward(self, q: torch.Tensor, x: torch.Tensor, key_padding_mask=None):
         # True cross-attention: queries attend to encoder frames (keys/values = x)
@@ -2531,8 +2526,9 @@ class AudioQFormerResampler(nn.Module):
         self.d_in = d_in
         self.d_out = d_out if d_out is not None else d_in
         
-        # Learnable queries with default PyTorch initialization (like nn.Linear)
-        self.q = nn.Parameter(torch.empty(k_tokens, d_in))
+        # Learnable queries - initialize with zeros first to ensure clean memory
+        self.q = nn.Parameter(torch.zeros(k_tokens, d_in))
+        # Then apply uniform initialization
         bound = 1 / math.sqrt(d_in)
         nn.init.uniform_(self.q, -bound, bound)
         
@@ -2546,10 +2542,6 @@ class AudioQFormerResampler(nn.Module):
         
         print(f"✓ AudioQFormerResampler: {k_tokens} queries, {n_layers} layers, {n_heads} heads")
         print(f"  Input: {d_in}D → Output: {self.d_out}D")
-
-    def _initialize_weights(self, module):
-        """Required by Transformers initialization system - use defaults"""
-        pass  # Let PyTorch use default initialization
 
     def forward(self, x: torch.Tensor, key_padding_mask: Optional[torch.Tensor] = None):
         # x: [B, T, d_in], key_padding_mask: [B, T] (True = pad), optional
