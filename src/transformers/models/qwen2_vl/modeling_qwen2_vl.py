@@ -2544,23 +2544,9 @@ class AudioQFormerResampler(nn.Module):
         print(f"✓ AudioQFormerResampler: {k_tokens} queries, {n_layers} layers, {n_heads} heads")
         print(f"  Input: {d_in}D → Output: {self.d_out}D")
         
-        # Register forward hook to check for corruption
-        self.register_forward_pre_hook(self._check_parameters)
     
-    def _check_parameters(self, module, input):
-        """Check for parameter corruption before forward pass"""
-        if hasattr(self, 'q'):
-            if torch.isnan(self.q).any() or torch.isinf(self.q).any() or (self.q.abs() > 1e10).any():
-                print(f"[ERROR] Q-Former queries corrupted in forward!")
-                print(f"  Stats: min={self.q.min()}, max={self.q.max()}, dtype={self.q.dtype}")
-                print(f"  First row sample: {self.q[0, :5]}")
-                # Try to recover by reinitializing
-                with torch.no_grad():
-                    self.q.data = torch.randn_like(self.q) * (1 / math.sqrt(self.d_in))
-                print(f"[INFO] Reinitialized queries to recover from corruption")
-    
-    def _init_weights(self, module):
-        """Override parent's _init_weights to prevent re-initialization of our parameters"""
+    def _initialize_weights(self, module):
+        """Override parent's _initialize_weights to prevent re-initialization of our parameters"""
         # Don't reinitialize our carefully initialized parameters
         pass
 
