@@ -2702,18 +2702,24 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
         whisper_cfg = WhisperConfig()
         self.audio_encoder = WhisperEncoder(whisper_cfg)
         
-        # Q-Former approach for audio compression (no separate linear projection)
-        d_audio = whisper_cfg.d_model
-        self.audio_num_queries = getattr(config, "audio_num_queries", 64)  # Default 64 queries
+        # Choose between linear projection or Q-Former
+        use_qformer = getattr(config, "use_audio_qformer", True)
         
-        # Q-Former resampler handles both compression and dimension change
-        self.audio_resampler = AudioQFormerResampler(
-            d_in=d_audio,             # Input: Whisper d_model (384)
-            d_out=config.hidden_size, # Output: LLM hidden_size (3584)
-            k_tokens=self.audio_num_queries,
-            n_heads=getattr(config, "audio_resampler_heads", 8),
-            n_layers=getattr(config, "audio_resampler_layers", 2),
-        )
+        if use_qformer:
+            # Q-Former approach for audio compression 
+            d_audio = whisper_cfg.d_model
+            self.audio_num_queries = getattr(config, "audio_num_queries", 64)
+            
+            self.audio_proj = AudioQFormerResampler(
+                d_in=d_audio,             # Input: Whisper d_model (384)
+                d_out=config.hidden_size, # Output: LLM hidden_size (3584)
+                k_tokens=self.audio_num_queries,
+                n_heads=getattr(config, "audio_resampler_heads", 8),
+                n_layers=getattr(config, "audio_resampler_layers", 2),
+            )
+        else:
+            # Simple linear projection (original working approach)
+            self.audio_proj = nn.Linear(whisper_cfg.d_model, config.hidden_size, bias=False)
 
         '''
         # ------------------- Whisper encoder -------------------
@@ -2744,6 +2750,7 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
     def init_blip2_qformer_weights(self, blip2_model_name: str = "Salesforce/blip2-opt-2.7b"):
         """
         Initialize the audio Q-Former with weights from a BLIP-2 model.
+        Only works if the model was configured with use_audio_qformer=True.
         
         This method loads BLIP-2 Q-Former weights and adapts them for audio processing:
         - Expands query tokens from 32 to 64
@@ -2754,8 +2761,11 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
         Args:
             blip2_model_name: BLIP-2 checkpoint name (default: "Salesforce/blip2-opt-2.7b")
         """
+        if not hasattr(self.audio_proj, 'load_blip2_qformer_weights'):
+            raise ValueError("Model was not configured with Q-Former. Set use_audio_qformer=True in config.")
+        
         print(f"Initializing audio Q-Former with BLIP-2 weights from {blip2_model_name}...")
-        self.audio_resampler.load_blip2_qformer_weights(blip2_model_name)
+        self.audio_proj.load_blip2_qformer_weights(blip2_model_name)
         print("✓ Audio Q-Former successfully initialized with BLIP-2 weights")
 
     # ------------------------------------------------------------------
@@ -2867,64 +2877,36 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
                 video_embeds = video_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
                 inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
 
-            # ---------- audio (Q-Former) ----------
-            n_audio_pad_total = (input_ids == self.audio_token_id).sum().item()
-            if n_audio_pad_total == 0:
+            n_audio_tokens = (input_ids == self.audio_token_id).sum().item()
+            if n_audio_tokens == 0:
                 audio_mels = None  # Skip processing if no placeholder exists
 
             if audio_mels is not None:
-                # Whisper encoder expects (B, 80, T) not (B, T, 80)
+                #print(f"audio_mels shape 1 = {audio_mels.shape}")
+                # Whisper expects (B, T, 80) float32
                 if audio_mels.dim() != 3:
-                    raise ValueError("`audio_mels` must be 3-D (B, 80, T) or (B, T, 80)")
-                    
-                if audio_mels.shape[1] == 80:
-                    # Already (B, 80, T) - correct for Whisper
-                    audio_feats = audio_mels
-                elif audio_mels.shape[2] == 80:
-                    # Need to transpose from (B, T, 80) to (B, 80, T)
+                    raise ValueError("`audio_mels` must be 3-D (batch, 80, frames) or (batch, frames, 80).")
+                if audio_mels.shape[1] == 80:                           # (B, 80, T) → (B, T, 80)
                     audio_feats = audio_mels.transpose(1, 2).contiguous()
                 else:
-                    raise ValueError(f"Expected 80 mel channels, got shape: {audio_mels.shape}")
-                
-                # Use bf16 for better performance on modern GPUs
+                    audio_feats = audio_mels
+                audio_feats = audio_mels
+                #audio_feats = audio_feats.to(dtype=torch.float32)
                 audio_feats = audio_feats.to(dtype=torch.bfloat16)
-                
-                # Whisper encoder expects (B, 80, T) → [B, T', d_audio]
-                whisper_out = self.audio_encoder(audio_feats)
+                #print(f"audio_feats shape = {audio_feats.shape}")
+                #whisper_out = self.audio_encoder(
+                #    audio_feats, attention_mask=audio_attention_mask
+                #)
+                whisper_out = self.audio_encoder(
+                    audio_feats
+                )            
+                #print("Here after passing through audio encoder...")
                 audio_hidden = (
-                    whisper_out.last_hidden_state 
-                    if hasattr(whisper_out, "last_hidden_state") 
+                    whisper_out.last_hidden_state
+                    if hasattr(whisper_out, "last_hidden_state")
                     else whisper_out[0]
-                )
-                
-                # Q-Former resampler directly handles dimension change → [B, K, hidden_size] 
-                # (optional) padding mask for cross-attn (not provided here; add if you have lengths)
-                key_padding_mask = None  # shape [B, T'] with True=pad
-                audio_embeds = self.audio_resampler(audio_hidden, key_padding_mask=key_padding_mask)
-                audio_embeds = audio_embeds.to(inputs_embeds.dtype)
-                
-                # ---- Robustly match whatever number of <audio_pad> tokens are in input_ids (per-sample) ----
-                audio_mask = (input_ids == self.audio_token_id)        # [B, S]
-                per_sample_counts = audio_mask.sum(dim=1).tolist()     # list of ints per batch item
-                B, K, H = audio_embeds.shape
-                
-                per_sample_slices = []
-                for i in range(B):
-                    ci = per_sample_counts[i]
-                    qi = audio_embeds[i]  # [K, H]
-                    if ci == K:
-                        pi = qi
-                    elif ci < K:
-                        # trim to the first ci tokens
-                        pi = qi[:ci]
-                    else:
-                        # repeat K tokens to reach ci, then trim
-                        import math
-                        reps = math.ceil(ci / K)
-                        pi = qi.repeat(reps, 1)[:ci]
-                    per_sample_slices.append(pi)
-                
-                audio_flat = torch.cat(per_sample_slices, dim=0)  # [sum(ci), H]
+                )                                                       # (B, T', d_model)
+                audio_embeds = self.audio_proj(audio_hidden)            # (B, T', hidden) or (B, K, hidden)
 
                 '''
                 # flatten to (N_audio_tokens, hidden)
@@ -2935,17 +2917,26 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
                 else:
                     audio_embeds = audio_embeds.reshape(-1, audio_embeds.size(-1))
                 '''
+                audio_embeds = audio_embeds.reshape(-1, audio_embeds.size(-1))
 
-                n_audio_features = audio_flat.size(0)
-                if n_audio_features != n_audio_pad_total:
+                '''
+                pad_tok = "<|audio_pad|>"
+                # ╭───────────────── 8. Sanity-check #pads vs expected frames ─────────────────╮
+                tokens = processor.tokenizer.convert_ids_to_tokens(features["input_ids"][0])
+                expected_pads = sum(compute_audio_pad_count(arr, sr) for arr, sr in audio_inputs)
+                print(f"[CHECK] input_ids contain {tokens.count(pad_tok)} {pad_tok!r} tokens "
+                    f"(expected {expected_pads})")
+                '''
+                #print(f"self.audio_token_id = {self.audio_token_id}")
+                n_audio_tokens   = (input_ids == self.audio_token_id).sum().item()
+                n_audio_features = audio_embeds.size(0)
+                if n_audio_tokens != n_audio_features:
                     raise ValueError(
-                        f"Audio tokens mismatch: tokenizer has {n_audio_pad_total} <audio_pad> tokens "
-                        f"but prepared {n_audio_features} features."
+                        f"Found {n_audio_tokens} <audio_pad> tokens but {n_audio_features} audio frames."
                     )
-                
-                # Inject audio features at <|audio_pad|> positions
-                mask = audio_mask.unsqueeze(-1).expand(-1, -1, inputs_embeds.size(-1))  # [B, S, H]
-                inputs_embeds = inputs_embeds.masked_scatter(mask.to(inputs_embeds.device), audio_flat)
+
+                mask = (input_ids == self.audio_token_id).unsqueeze(-1).expand_as(inputs_embeds)
+                inputs_embeds = inputs_embeds.masked_scatter(mask, audio_embeds.to(inputs_embeds.dtype))
             #print("Updated audio class..")
             if attention_mask is not None:
                 attention_mask = attention_mask.to(inputs_embeds.device)
