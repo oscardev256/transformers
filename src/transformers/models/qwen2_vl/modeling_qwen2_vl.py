@@ -2695,7 +2695,7 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
       <image_pad>/<video_pad> tokens.
     """
 
-    def __init__(self, config: Qwen2VLConfig, use_audio_qformer: bool = True):
+    def __init__(self, config: Qwen2VLConfig, use_qformer: bool = True):
         super().__init__(config)
 
         #whisper_cfg = WhisperConfig.from_dict(config.audio_config.to_dict())
