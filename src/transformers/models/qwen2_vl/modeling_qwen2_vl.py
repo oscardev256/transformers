@@ -2695,7 +2695,7 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
       <image_pad>/<video_pad> tokens.
     """
 
-    def __init__(self, config: Qwen2VLConfig):
+    def __init__(self, config: Qwen2VLConfig, use_audio_qformer: bool = True):
         super().__init__(config)
 
         #whisper_cfg = WhisperConfig.from_dict(config.audio_config.to_dict())
@@ -2703,7 +2703,7 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
         self.audio_encoder = WhisperEncoder(whisper_cfg)
         
         # Choose between linear projection or Q-Former
-        use_qformer = getattr(config, "use_audio_qformer", True)
+        #use_qformer = getattr(config, "use_audio_qformer", True)
         
         if use_qformer:
             # Q-Former approach for audio compression 
