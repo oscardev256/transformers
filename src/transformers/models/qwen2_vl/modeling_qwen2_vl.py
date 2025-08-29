@@ -2590,6 +2590,9 @@ class AudioQFormerResampler(nn.Module):
             
         # Load cross-attention layers (use first n_layers from BLIP-2's 12 layers)  
         loaded_layers = 0
+        blip2_heads = 12
+        our_heads = 8
+        
         for layer_idx in range(min(len(self.blocks), 12)):  # BLIP-2 has 12 layers
             try:
                 our_block = self.blocks[layer_idx]
@@ -2613,8 +2616,6 @@ class AudioQFormerResampler(nn.Module):
                     blip2_v_weight = blip2_state_dict[blip2_value_key]  # [768*12, 1408]
                     
                     # Adapt dimensions: 12 heads -> 8 heads, 768 -> 384 hidden
-                    blip2_heads = 12
-                    our_heads = 8
                     blip2_head_dim = blip2_q_weight.shape[0] // blip2_heads  # 768 / 12 = 64
                     our_head_dim = self.d_in // our_heads  # 384 / 8 = 48
                     
