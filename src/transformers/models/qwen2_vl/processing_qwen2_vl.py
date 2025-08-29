@@ -289,9 +289,9 @@ def compute_audio_pad_count(n_mel_frames: int = None, use_qformer: bool = True, 
         # Q-Former always outputs fixed number of tokens regardless of input length
         return num_queries
     else:
-        # Legacy conv compression: Whisper CNN (2x) + conv (30x) = 60x total
+        # Legacy conv compression: Whisper CNN (2x)
         cnn_total_stride = 2
-        compression_stride = 30
+        compression_stride = 1
         return math.ceil(n_mel_frames / (cnn_total_stride * compression_stride))
 
 
