@@ -2526,11 +2526,10 @@ class AudioQFormerResampler(nn.Module):
         self.d_in = d_in
         self.d_out = d_out if d_out is not None else d_in
         
-        # Learnable queries - initialize with zeros first to ensure clean memory
-        self.q = nn.Parameter(torch.zeros(k_tokens, d_in))
-        # Then apply uniform initialization
-        bound = 1 / math.sqrt(d_in)
-        nn.init.uniform_(self.q, -bound, bound)
+        # Learnable queries - initialize carefully to avoid corruption
+        queries = torch.randn(k_tokens, d_in, dtype=torch.float32) * (1 / math.sqrt(d_in))
+        self.q = nn.Parameter(queries.clone())  # Clone to ensure no shared memory issues
+        print(f"[DEBUG] After init, q stats: min={self.q.min():.6f}, max={self.q.max():.6f}, dtype={self.q.dtype}, shape={self.q.shape}")
         
         self.blocks = nn.ModuleList([_CrossAttnBlock(d_in, n_heads) for _ in range(n_layers)])
         
@@ -2542,10 +2541,30 @@ class AudioQFormerResampler(nn.Module):
         
         print(f"✓ AudioQFormerResampler: {k_tokens} queries, {n_layers} layers, {n_heads} heads")
         print(f"  Input: {d_in}D → Output: {self.d_out}D")
+        
+        # Register forward hook to check for corruption
+        self.register_forward_pre_hook(self._check_parameters)
+    
+    def _check_parameters(self, module, input):
+        """Check for parameter corruption before forward pass"""
+        if hasattr(self, 'q'):
+            if torch.isnan(self.q).any() or torch.isinf(self.q).any() or (self.q.abs() > 1e10).any():
+                print(f"[ERROR] Q-Former queries corrupted in forward!")
+                print(f"  Stats: min={self.q.min()}, max={self.q.max()}, dtype={self.q.dtype}")
+                print(f"  First row sample: {self.q[0, :5]}")
+                # Try to recover by reinitializing
+                with torch.no_grad():
+                    self.q.data = torch.randn_like(self.q) * (1 / math.sqrt(self.d_in))
+                print(f"[INFO] Reinitialized queries to recover from corruption")
 
     def forward(self, x: torch.Tensor, key_padding_mask: Optional[torch.Tensor] = None):
         # x: [B, T, d_in], key_padding_mask: [B, T] (True = pad), optional
         B, T, D = x.shape
+        
+        # Debug check for parameter corruption
+        if torch.isnan(self.q).any() or torch.isinf(self.q).any() or (self.q.abs() > 1e10).any():
+            print(f"[WARNING] Q-Former queries corrupted! min={self.q.min()}, max={self.q.max()}")
+            print(f"[WARNING] First row: {self.q[0, :5]}")  # Show first 5 values of first row
         q = self.q.unsqueeze(0).expand(B, self.k, D)  # [B, K, d_in]
         for blk in self.blocks:
             q = blk(q, x, key_padding_mask=key_padding_mask)
