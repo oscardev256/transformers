@@ -2526,9 +2526,12 @@ class AudioQFormerResampler(nn.Module):
         self.d_in = d_in
         self.d_out = d_out if d_out is not None else d_in
         
-        # Learnable queries - initialize carefully to avoid corruption
-        queries = torch.randn(k_tokens, d_in, dtype=torch.float32) * (1 / math.sqrt(d_in))
-        self.q = nn.Parameter(queries.clone())  # Clone to ensure no shared memory issues
+        # Learnable queries - use same initialization as nn.Linear for consistency
+        self.q = nn.Parameter(torch.empty(k_tokens, d_in))
+        # Initialize using the same method as nn.Linear
+        with torch.no_grad():
+            bound = 1 / math.sqrt(d_in) 
+            self.q.uniform_(-bound, bound)
         print(f"[DEBUG] After init, q stats: min={self.q.min():.6f}, max={self.q.max():.6f}, dtype={self.q.dtype}, shape={self.q.shape}")
         
         self.blocks = nn.ModuleList([_CrossAttnBlock(d_in, n_heads) for _ in range(n_layers)])
@@ -2556,16 +2559,18 @@ class AudioQFormerResampler(nn.Module):
                 with torch.no_grad():
                     self.q.data = torch.randn_like(self.q) * (1 / math.sqrt(self.d_in))
                 print(f"[INFO] Reinitialized queries to recover from corruption")
+    
+    def _init_weights(self, module):
+        """Override parent's _init_weights to prevent re-initialization of our parameters"""
+        # Don't reinitialize our carefully initialized parameters
+        pass
 
     def forward(self, x: torch.Tensor, key_padding_mask: Optional[torch.Tensor] = None):
         # x: [B, T, d_in], key_padding_mask: [B, T] (True = pad), optional
         B, T, D = x.shape
         
-        # Debug check for parameter corruption
-        if torch.isnan(self.q).any() or torch.isinf(self.q).any() or (self.q.abs() > 1e10).any():
-            print(f"[WARNING] Q-Former queries corrupted! min={self.q.min()}, max={self.q.max()}")
-            print(f"[WARNING] First row: {self.q[0, :5]}")  # Show first 5 values of first row
-        q = self.q.unsqueeze(0).expand(B, self.k, D)  # [B, K, d_in]
+        # Expand queries for batch - use repeat instead of expand to avoid aliasing
+        q = self.q.unsqueeze(0).repeat(B, 1, 1)  # [B, K, d_in]
         for blk in self.blocks:
             q = blk(q, x, key_padding_mask=key_padding_mask)
         # Project to output dimension
