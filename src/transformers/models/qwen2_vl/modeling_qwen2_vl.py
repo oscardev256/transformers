@@ -2532,7 +2532,6 @@ class AudioQFormerResampler(nn.Module):
         with torch.no_grad():
             bound = 1 / math.sqrt(d_in) 
             self.q.uniform_(-bound, bound)
-        print(f"[DEBUG] After init, q stats: min={self.q.min().item():.6f}, max={self.q.max().item():.6f}, dtype={self.q.dtype}, shape={self.q.shape}")
         
         self.blocks = nn.ModuleList([_CrossAttnBlock(d_in, n_heads) for _ in range(n_layers)])
         
