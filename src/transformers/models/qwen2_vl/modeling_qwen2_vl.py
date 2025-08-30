@@ -2394,7 +2394,9 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
             
             # Create expanded query tokens in fp32 (512 instead of default 32)
             qformer_hidden = blip2_model.config.qformer_config.hidden_size  # 768
-            self.audio_query_tokens = nn.Parameter(torch.zeros(1, max_queries, qformer_hidden, dtype=torch.float32))
+            # Initialize with proper distribution to avoid parameter corruption
+            query_init = torch.randn(1, max_queries, qformer_hidden, dtype=torch.float32) * 0.02
+            self.audio_query_tokens = nn.Parameter(query_init)
             
             # Add dimension adapter: Whisper (384D) -> BLIP-2 expected size
             d_audio = whisper_cfg.d_model  # 384
