@@ -1473,6 +1473,17 @@ class Qwen2VLAudioModel(Qwen2VLPreTrainedModel):
                 if query_output.dtype != adapted_audio.dtype:
                     query_output = query_output.to(adapted_audio.dtype)
                 
+                # Debug: Check final projection dtypes
+                if not hasattr(self, '_proj_dtype_printed'):
+                    print(f"Audio projection dtypes - query_output: {query_output.dtype}, adapter weights: {self.audio_adapter.weight.dtype}")
+                    self._proj_dtype_printed = True
+                else:
+                    # Warn if not bf16 on subsequent passes
+                    if query_output.dtype != torch.bfloat16:
+                        print(f"WARNING: query_output not bf16: {query_output.dtype}")
+                    if self.audio_adapter.weight.dtype != torch.bfloat16:
+                        print(f"WARNING: audio_adapter weights not bf16: {self.audio_adapter.weight.dtype}")
+                
                 audio_embeds = self.audio_proj(query_output)  # (B, 512, 3584)
                 audio_embeds = audio_embeds.reshape(-1, audio_embeds.size(-1))  # (B*512, 3584)
             else:
@@ -2610,6 +2621,17 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
                     # Q-Former is kept in fp32, downcast output if needed (following BLIP-2)
                     if query_output.dtype != adapted_audio.dtype:
                         query_output = query_output.to(adapted_audio.dtype)
+                    
+                    # Debug: Check final projection dtypes
+                    if not hasattr(self, '_proj_dtype_printed'):
+                        print(f"Audio projection dtypes - query_output: {query_output.dtype}, adapter weights: {self.audio_adapter.weight.dtype}")
+                        self._proj_dtype_printed = True
+                    else:
+                        # Warn if not bf16 on subsequent passes
+                        if query_output.dtype != torch.bfloat16:
+                            print(f"WARNING: query_output not bf16: {query_output.dtype}")
+                        if self.audio_adapter.weight.dtype != torch.bfloat16:
+                            print(f"WARNING: audio_adapter weights not bf16: {self.audio_adapter.weight.dtype}")
                     
                     audio_embeds = self.audio_proj(query_output)  # (B, 512, 3584)
                 else:
