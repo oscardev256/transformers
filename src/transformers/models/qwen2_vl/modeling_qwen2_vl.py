@@ -1434,23 +1434,24 @@ class Qwen2VLAudioModel(Qwen2VLPreTrainedModel):
                 # Adapt Whisper dimensions to BLIP-2 expected size
                 adapted_audio = self.audio_adapter(audio_hidden)  # (B, T', 384) -> (B, T', 1408)
                 
-                # Convert to fp32 for Q-Former computation (ensuring fp32 calculations)
+                # Convert both to fp32 for Q-Former computation (ensuring fp32 calculations)
+                query_tokens_fp32 = query_tokens.to(torch.float32)
                 adapted_audio_fp32 = adapted_audio.to(torch.float32)
                 
                 # Debug: Print dtypes on first forward pass and warn if not fp32
                 if not hasattr(self, '_dtype_printed'):
-                    print(f"Debug dtypes - query_tokens: {query_tokens.dtype}, adapted_audio: {adapted_audio_fp32.dtype}")
+                    print(f"Debug dtypes - query_tokens_fp32: {query_tokens_fp32.dtype}, adapted_audio_fp32: {adapted_audio_fp32.dtype}")
                     self._dtype_printed = True
                 else:
                     # Check dtypes on subsequent passes and warn if not fp32
-                    if query_tokens.dtype != torch.float32:
-                        print(f"WARNING: query_tokens not fp32: {query_tokens.dtype}")
+                    if query_tokens_fp32.dtype != torch.float32:
+                        print(f"WARNING: query_tokens_fp32 not fp32: {query_tokens_fp32.dtype}")
                     if adapted_audio_fp32.dtype != torch.float32:
-                        print(f"WARNING: adapted_audio not fp32: {adapted_audio_fp32.dtype}")
+                        print(f"WARNING: adapted_audio_fp32 not fp32: {adapted_audio_fp32.dtype}")
                 
                 # Q-Former cross-attention: queries attend to audio features (all in fp32)
                 qformer_outputs = self.audio_qformer(
-                    query_embeds=query_tokens,
+                    query_embeds=query_tokens_fp32,
                     encoder_hidden_states=adapted_audio_fp32,  # fp32 for stable computations
                     encoder_attention_mask=None,  # No masking for now
                     return_dict=True
@@ -2571,23 +2572,24 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
                     # Adapt Whisper dimensions to BLIP-2 expected size
                     adapted_audio = self.audio_adapter(audio_hidden)  # (B, T', 384) -> (B, T', 1408)
                     
-                    # Convert to fp32 for Q-Former computation (ensuring fp32 calculations)
+                    # Convert both to fp32 for Q-Former computation (ensuring fp32 calculations)
+                    query_tokens_fp32 = query_tokens.to(torch.float32)
                     adapted_audio_fp32 = adapted_audio.to(torch.float32)
                     
                     # Debug: Print dtypes on first forward pass and warn if not fp32
                     if not hasattr(self, '_dtype_printed'):
-                        print(f"Debug dtypes - query_tokens: {query_tokens.dtype}, adapted_audio: {adapted_audio_fp32.dtype}")
+                        print(f"Debug dtypes - query_tokens_fp32: {query_tokens_fp32.dtype}, adapted_audio_fp32: {adapted_audio_fp32.dtype}")
                         self._dtype_printed = True
                     else:
                         # Check dtypes on subsequent passes and warn if not fp32
-                        if query_tokens.dtype != torch.float32:
-                            print(f"WARNING: query_tokens not fp32: {query_tokens.dtype}")
+                        if query_tokens_fp32.dtype != torch.float32:
+                            print(f"WARNING: query_tokens_fp32 not fp32: {query_tokens_fp32.dtype}")
                         if adapted_audio_fp32.dtype != torch.float32:
-                            print(f"WARNING: adapted_audio not fp32: {adapted_audio_fp32.dtype}")
+                            print(f"WARNING: adapted_audio_fp32 not fp32: {adapted_audio_fp32.dtype}")
                     
                     # Q-Former cross-attention: queries attend to audio features (all in fp32)
                     qformer_outputs = self.audio_qformer(
-                        query_embeds=query_tokens,
+                        query_embeds=query_tokens_fp32,
                         encoder_hidden_states=adapted_audio_fp32,  # fp32 for stable computations
                         encoder_attention_mask=None,  # No masking for now
                         return_dict=True
