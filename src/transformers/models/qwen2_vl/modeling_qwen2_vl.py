@@ -2527,7 +2527,29 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
                     if hasattr(whisper_out, "last_hidden_state")
                     else whisper_out[0]
                 )                                                       # (B, T', d_model)
-                audio_embeds = self.audio_proj(audio_hidden)            # (B, T', hidden) or (B, K, hidden)
+                
+                # Use BLIP-2 Q-Former for audio compression
+                if hasattr(self, 'audio_qformer'):
+                    # BLIP-2 Q-Former approach: fixed number of query tokens
+                    batch_size = audio_hidden.shape[0]
+                    query_tokens = self.audio_query_tokens.expand(batch_size, -1, -1)  # (B, 32, 768)
+                    
+                    # Adapt Whisper dimensions to BLIP-2 expected size
+                    adapted_audio = self.audio_adapter(audio_hidden)  # (B, T', 384) -> (B, T', 1408)
+                    
+                    # Q-Former cross-attention: queries attend to audio features
+                    qformer_outputs = self.audio_qformer(
+                        query_embeds=query_tokens,
+                        encoder_hidden_states=adapted_audio,  # Adapted audio features as keys/values
+                        encoder_attention_mask=None,  # No masking for now
+                        return_dict=True
+                    )
+                    
+                    # Project Q-Former output to LLM hidden size
+                    audio_embeds = self.audio_proj(qformer_outputs.last_hidden_state)  # (B, 32, 3584)
+                else:
+                    # Fallback to direct projection
+                    audio_embeds = self.audio_proj(audio_hidden)            # (B, T', hidden) or (B, K, hidden)
 
                 '''
                 # flatten to (N_audio_tokens, hidden)
