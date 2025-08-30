@@ -2316,17 +2316,22 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
         #use_qformer = getattr(config, "use_audio_qformer", True)
         
         if use_qformer:
-            # Q-Former approach using BLIP-2's proven implementation
+            # Q-Former approach using BLIP-2's proven implementation with maximum queries
             from transformers import Blip2ForConditionalGeneration, Blip2Config
+            import torch.nn as nn
             
             # Load BLIP-2 to extract Q-Former components
             print("Loading BLIP-2 Q-Former components...")
             blip2_model = Blip2ForConditionalGeneration.from_pretrained("Salesforce/blip2-opt-2.7b")
             
-            # Extract Q-Former and query tokens
+            # Extract Q-Former and expand to maximum queries (512 - max_position_embeddings)
             self.audio_qformer = blip2_model.qformer
-            self.audio_query_tokens = blip2_model.query_tokens
-            self.audio_num_queries = blip2_model.config.num_query_tokens
+            max_queries = blip2_model.config.qformer_config.max_position_embeddings  # 512
+            self.audio_num_queries = max_queries
+            
+            # Create expanded query tokens (512 instead of default 32)
+            qformer_hidden = blip2_model.config.qformer_config.hidden_size  # 768
+            self.audio_query_tokens = nn.Parameter(torch.zeros(1, max_queries, qformer_hidden))
             
             # Add dimension adapter: Whisper (384D) -> BLIP-2 expected size
             d_audio = whisper_cfg.d_model  # 384
@@ -2336,7 +2341,7 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
             self.audio_adapter = nn.Linear(d_audio, encoder_hidden_size, bias=False)  # 384 -> 1408
             self.audio_proj = nn.Linear(qformer_hidden, config.hidden_size, bias=False)  # 768 -> 3584
             
-            print(f"✓ BLIP-2 Q-Former loaded: {self.audio_num_queries} queries")
+            print(f"✓ BLIP-2 Q-Former loaded with maximum queries: {self.audio_num_queries} queries")
             print(f"  Pipeline: Whisper({d_audio}D) → Adapter({encoder_hidden_size}D) → Q-Former({qformer_hidden}D) → LLM({config.hidden_size}D)")
         else:
             # Simple linear projection (original working approach)
