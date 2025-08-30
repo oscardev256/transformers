@@ -1443,8 +1443,14 @@ class Qwen2VLAudioModel(Qwen2VLPreTrainedModel):
                 )
                 
                 # Project Q-Former output to LLM hidden size
-                audio_embeds = self.audio_proj(qformer_outputs.last_hidden_state)  # (B, 32, 3584)
-                audio_embeds = audio_embeds.reshape(-1, audio_embeds.size(-1))  # (B*32, 3584)
+                query_output = qformer_outputs.last_hidden_state  # (B, 512, 768)
+                
+                # Q-Former is kept in fp32, downcast output if needed (following BLIP-2)
+                if query_output.dtype != adapted_audio.dtype:
+                    query_output = query_output.to(adapted_audio.dtype)
+                
+                audio_embeds = self.audio_proj(query_output)  # (B, 512, 3584)
+                audio_embeds = audio_embeds.reshape(-1, audio_embeds.size(-1))  # (B*512, 3584)
             else:
                 # Fallback to direct projection
                 audio_embeds = self.audio_proj(audio_hidden)            # (B, T', hidden)
@@ -2317,21 +2323,21 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
         
         if use_qformer:
             # Q-Former approach using BLIP-2's proven implementation with maximum queries
-            from transformers import Blip2ForConditionalGeneration, Blip2Config
-            import torch.nn as nn
+            from transformers import Blip2ForConditionalGeneration
             
             # Load BLIP-2 to extract Q-Former components
             print("Loading BLIP-2 Q-Former components...")
             blip2_model = Blip2ForConditionalGeneration.from_pretrained("Salesforce/blip2-opt-2.7b")
             
             # Extract Q-Former and expand to maximum queries (512 - max_position_embeddings)
-            self.audio_qformer = blip2_model.qformer
+            # Keep Q-Former in fp32 for numerical stability (following BLIP-2 approach)
+            self.audio_qformer = blip2_model.qformer.to(torch.float32)
             max_queries = blip2_model.config.qformer_config.max_position_embeddings  # 512
             self.audio_num_queries = max_queries
             
-            # Create expanded query tokens (512 instead of default 32)
+            # Create expanded query tokens in fp32 (512 instead of default 32)
             qformer_hidden = blip2_model.config.qformer_config.hidden_size  # 768
-            self.audio_query_tokens = nn.Parameter(torch.zeros(1, max_queries, qformer_hidden))
+            self.audio_query_tokens = nn.Parameter(torch.zeros(1, max_queries, qformer_hidden, dtype=torch.float32))
             
             # Add dimension adapter: Whisper (384D) -> BLIP-2 expected size
             d_audio = whisper_cfg.d_model  # 384
@@ -2551,7 +2557,13 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
                     )
                     
                     # Project Q-Former output to LLM hidden size
-                    audio_embeds = self.audio_proj(qformer_outputs.last_hidden_state)  # (B, 32, 3584)
+                    query_output = qformer_outputs.last_hidden_state  # (B, 512, 768)
+                    
+                    # Q-Former is kept in fp32, downcast output if needed (following BLIP-2)
+                    if query_output.dtype != adapted_audio.dtype:
+                        query_output = query_output.to(adapted_audio.dtype)
+                    
+                    audio_embeds = self.audio_proj(query_output)  # (B, 512, 3584)
                 else:
                     # Fallback to direct projection
                     audio_embeds = self.audio_proj(audio_hidden)            # (B, T', hidden) or (B, K, hidden)
