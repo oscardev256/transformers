@@ -388,8 +388,8 @@ class Qwen2VLProcessor(ProcessorMixin):
                 wav_np = _ensure_16k(wav_np, sr)
                 mel, n_frames = _waveform_to_logmel(wav_np)
                 mel_list.append(mel)
-                # Use Q-Former with fixed token count
-                token_counts.append(compute_audio_pad_count(n_frames, use_qformer=self.use_qformer, num_queries=256))
+                # Use Q-Former with fixed token count (BLIP-2 default is 32)
+                token_counts.append(compute_audio_pad_count(n_frames, use_qformer=self.use_qformer, num_queries=32))
             audio_mels = np.stack(mel_list, axis=0)  # (B, 80, T)
         else:
             audio_mels, token_counts = None, None

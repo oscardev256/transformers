@@ -1424,9 +1424,31 @@ class Qwen2VLAudioModel(Qwen2VLPreTrainedModel):
                 if hasattr(whisper_out, "last_hidden_state")
                 else whisper_out[0]
             )                                                       # (B, T', d_model)
-            audio_embeds = self.audio_proj(audio_hidden)            # (B, T', hidden)
-
-            audio_embeds = audio_embeds.reshape(-1, audio_embeds.size(-1))
+            
+            # Use BLIP-2 Q-Former for audio compression
+            if hasattr(self, 'audio_qformer'):
+                # BLIP-2 Q-Former approach: fixed number of query tokens
+                batch_size = audio_hidden.shape[0]
+                query_tokens = self.audio_query_tokens.expand(batch_size, -1, -1)  # (B, 32, 768)
+                
+                # Adapt Whisper dimensions to BLIP-2 expected size
+                adapted_audio = self.audio_adapter(audio_hidden)  # (B, T', 384) -> (B, T', 1408)
+                
+                # Q-Former cross-attention: queries attend to audio features
+                qformer_outputs = self.audio_qformer(
+                    query_embeds=query_tokens,
+                    encoder_hidden_states=adapted_audio,  # Adapted audio features as keys/values
+                    encoder_attention_mask=None,  # No masking for now
+                    return_dict=True
+                )
+                
+                # Project Q-Former output to LLM hidden size
+                audio_embeds = self.audio_proj(qformer_outputs.last_hidden_state)  # (B, 32, 3584)
+                audio_embeds = audio_embeds.reshape(-1, audio_embeds.size(-1))  # (B*32, 3584)
+            else:
+                # Fallback to direct projection
+                audio_embeds = self.audio_proj(audio_hidden)            # (B, T', hidden)
+                audio_embeds = audio_embeds.reshape(-1, audio_embeds.size(-1))
             n_audio_tokens   = (input_ids == self.audio_token_id).sum().item()
             n_audio_features = audio_embeds.size(0)
             if n_audio_tokens != n_audio_features:
@@ -2269,82 +2291,8 @@ class Qwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMixin):
 
         return input_ids, model_kwargs
 
-# -------- Q-Former style cross-attention blocks for audio compression --------
-class _CrossAttnBlock(nn.Module):
-    """Single cross-attention block for Q-Former"""
-    def __init__(self, d_model: int, n_heads: int, mlp_ratio: float = 4.0, drop: float = 0.0):
-        super().__init__()
-        self.ln_q = nn.LayerNorm(d_model)
-        self.ln_x = nn.LayerNorm(d_model)
-        self.attn = nn.MultiheadAttention(d_model, n_heads, dropout=drop, batch_first=True)
-        self.ln2 = nn.LayerNorm(d_model)
-        hidden = int(d_model * mlp_ratio)
-        self.mlp = nn.Sequential(
-            nn.Linear(d_model, hidden),
-            nn.GELU(),
-            nn.Linear(hidden, d_model),
-        )
-
-    def forward(self, q: torch.Tensor, x: torch.Tensor, key_padding_mask=None):
-        # True cross-attention: queries attend to encoder frames (keys/values = x)
-        q_res = q
-        q_norm = self.ln_q(q)
-        x_norm = self.ln_x(x)
-        out, _ = self.attn(q_norm, x_norm, x_norm, key_padding_mask=key_padding_mask)
-        q = q_res + out
-        q = q + self.mlp(self.ln2(q))
-        return q
-
-
-class AudioQFormerResampler(nn.Module):
-    """
-    Fixed-K learnable queries that cross-attend to audio encoder frames.
-    Output: [B, K, d_out]
-    """
-    def __init__(self, d_in: int, d_out: int = None, k_tokens: int = 64, n_heads: int = 8, n_layers: int = 2):
-        super().__init__()
-        self.k = k_tokens
-        self.d_in = d_in
-        self.d_out = d_out if d_out is not None else d_in
-        
-        # Learnable queries - create with desired dtype directly on device
-        # PyTorch docs: "create model parameters with the desired dtype directly on the device"  
-        self.q = nn.Parameter(torch.zeros(k_tokens, d_in, dtype=torch.bfloat16))
-        
-        self.blocks = nn.ModuleList([_CrossAttnBlock(d_in, n_heads) for _ in range(n_layers)])
-        
-        # Final projection to output dimension if different (uses default nn.Linear init)
-        if self.d_out != d_in:
-            self.output_proj = nn.Linear(d_in, self.d_out, bias=False)
-        else:
-            self.output_proj = nn.Identity()
-        
-        print(f"✓ AudioQFormerResampler: {k_tokens} queries, {n_layers} layers, {n_heads} heads")
-        print(f"  Input: {d_in}D → Output: {self.d_out}D")
-        
-    
-
-    def forward(self, x: torch.Tensor, key_padding_mask: Optional[torch.Tensor] = None):
-        # x: [B, T, d_in], key_padding_mask: [B, T] (True = pad), optional
-        B, T, D = x.shape
-        
-        # Expand queries for batch - use repeat instead of expand to avoid aliasing
-        q = self.q.unsqueeze(0).repeat(B, 1, 1)  # [B, K, d_in]
-        for blk in self.blocks:
-            q = blk(q, x, key_padding_mask=key_padding_mask)
-        # Project to output dimension
-        q = self.output_proj(q)  # [B, K, d_out]
-        return q
-
-    def load_blip2_qformer_weights(self, blip2_model_name: str = "Salesforce/blip2-opt-2.7b"):
-        """
-        Initialize Q-Former weights from a BLIP-2 model with dimension adaptation.
-        Simplified version that focuses on getting basic training working.
-        """
-        print(f"Initializing Q-Former with random weights (BLIP-2 loading disabled for debugging)")
-        print(f"✓ Q-Former initialized with Xavier uniform weights")
-        # Note: Complex BLIP-2 weight loading disabled to focus on getting training working
-        # The Q-Former will use its default initialization which should be sufficient for training
+# -------- Using BLIP-2's Q-Former implementation --------
+# Custom Q-Former classes removed - now using BLIP-2's proven implementation loaded directly from pretrained model
 
 
 class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
@@ -2368,17 +2316,28 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
         #use_qformer = getattr(config, "use_audio_qformer", True)
         
         if use_qformer:
-            # Q-Former approach for audio compression 
-            d_audio = whisper_cfg.d_model
-            self.audio_num_queries = getattr(config, "audio_num_queries", 256)
+            # Q-Former approach using BLIP-2's proven implementation
+            from transformers import Blip2ForConditionalGeneration, Blip2Config
             
-            self.audio_proj = AudioQFormerResampler(
-                d_in=d_audio,             # Input: Whisper d_model (384)
-                d_out=config.hidden_size, # Output: LLM hidden_size (3584)
-                k_tokens=self.audio_num_queries,
-                n_heads=getattr(config, "audio_resampler_heads", 8),
-                n_layers=getattr(config, "audio_resampler_layers", 2),
-            )
+            # Load BLIP-2 to extract Q-Former components
+            print("Loading BLIP-2 Q-Former components...")
+            blip2_model = Blip2ForConditionalGeneration.from_pretrained("Salesforce/blip2-opt-2.7b")
+            
+            # Extract Q-Former and query tokens
+            self.audio_qformer = blip2_model.qformer
+            self.audio_query_tokens = blip2_model.query_tokens
+            self.audio_num_queries = blip2_model.config.num_query_tokens
+            
+            # Add dimension adapter: Whisper (384D) -> BLIP-2 expected size
+            d_audio = whisper_cfg.d_model  # 384
+            encoder_hidden_size = blip2_model.config.encoder_hidden_size  # 1408 (ViT size)
+            qformer_hidden = blip2_model.config.qformer_config.hidden_size  # 768
+            
+            self.audio_adapter = nn.Linear(d_audio, encoder_hidden_size, bias=False)  # 384 -> 1408
+            self.audio_proj = nn.Linear(qformer_hidden, config.hidden_size, bias=False)  # 768 -> 3584
+            
+            print(f"✓ BLIP-2 Q-Former loaded: {self.audio_num_queries} queries")
+            print(f"  Pipeline: Whisper({d_audio}D) → Adapter({encoder_hidden_size}D) → Q-Former({qformer_hidden}D) → LLM({config.hidden_size}D)")
         else:
             # Simple linear projection (original working approach)
             self.audio_proj = nn.Linear(whisper_cfg.d_model, config.hidden_size, bias=False)
