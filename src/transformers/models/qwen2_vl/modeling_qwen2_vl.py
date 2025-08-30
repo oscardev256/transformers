@@ -2386,15 +2386,11 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
             print("Loading BLIP-2 Q-Former components...")
             blip2_model = Blip2ForConditionalGeneration.from_pretrained("Salesforce/blip2-opt-2.7b")
             
-            # Extract Q-Former and expand to maximum queries (512 - max_position_embeddings)
+            # Extract Q-Former with original queries (32 - BLIP-2 default for stability)
             # Keep Q-Former in fp32 for numerical stability (following BLIP-2 approach)
             self.audio_qformer = blip2_model.qformer.to(torch.float32)
-            max_queries = blip2_model.config.qformer_config.max_position_embeddings  # 512
-            self.audio_num_queries = max_queries
-            
-            # Create expanded query tokens in fp32 (512 instead of default 32)
-            qformer_hidden = blip2_model.config.qformer_config.hidden_size  # 768
-            self.audio_query_tokens = nn.Parameter(torch.zeros(1, max_queries, qformer_hidden, dtype=torch.float32))
+            self.audio_query_tokens = blip2_model.query_tokens.to(torch.float32)  # Use original 32 queries
+            self.audio_num_queries = blip2_model.config.num_query_tokens  # 32
             
             # Add dimension adapter: Whisper (384D) -> BLIP-2 expected size
             d_audio = whisper_cfg.d_model  # 384
