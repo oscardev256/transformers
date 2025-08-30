@@ -1485,6 +1485,15 @@ class Qwen2VLAudioModel(Qwen2VLPreTrainedModel):
                         print(f"WARNING: audio_adapter weights not bf16: {self.audio_adapter.weight.dtype}")
                 
                 audio_embeds = self.audio_proj(query_output)  # (B, 512, 3584)
+                
+                # Track running max of audio embeddings
+                current_max = torch.max(torch.abs(audio_embeds)).item()
+                if not hasattr(self, '_running_max'):
+                    self._running_max = current_max
+                else:
+                    self._running_max = max(self._running_max, current_max)
+                print(f"Audio embeds running max: {self._running_max:.4f} (current: {current_max:.4f})")
+                
                 audio_embeds = audio_embeds.reshape(-1, audio_embeds.size(-1))  # (B*512, 3584)
             else:
                 # Fallback to direct projection
@@ -2634,6 +2643,14 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
                             print(f"WARNING: audio_adapter weights not bf16: {self.audio_adapter.weight.dtype}")
                     
                     audio_embeds = self.audio_proj(query_output)  # (B, 512, 3584)
+                    
+                    # Track running max of audio embeddings
+                    current_max = torch.max(torch.abs(audio_embeds)).item()
+                    if not hasattr(self, '_running_max'):
+                        self._running_max = current_max
+                    else:
+                        self._running_max = max(self._running_max, current_max)
+                    print(f"Audio embeds running max: {self._running_max:.4f} (current: {current_max:.4f})")
                 else:
                     # Fallback to direct projection
                     audio_embeds = self.audio_proj(audio_hidden)            # (B, T', hidden) or (B, K, hidden)
