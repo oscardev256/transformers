@@ -1438,12 +1438,20 @@ class Qwen2VLAudioModel(Qwen2VLPreTrainedModel):
                 query_tokens_fp32 = query_tokens.to(torch.float32)
                 adapted_audio_fp32 = adapted_audio.to(torch.float32)
                 
-                # Debug: Print dtypes on first forward pass and warn if not fp32
+                # Debug: Print dtypes and check for NaN/inf on first forward pass
                 if not hasattr(self, '_dtype_printed'):
-                    print(f"Debug dtypes - query_tokens_fp32: {query_tokens_fp32.dtype}, adapted_audio_fp32: {adapted_audio_fp32.dtype}")
+                    query_max = torch.max(torch.abs(query_tokens_fp32)).item()
+                    audio_max = torch.max(torch.abs(adapted_audio_fp32)).item()
+                    print(f"Debug dtypes - query_tokens_fp32: {query_tokens_fp32.dtype} (max: {query_max:.4f}), adapted_audio_fp32: {adapted_audio_fp32.dtype} (max: {audio_max:.4f})")
                     self._dtype_printed = True
                 else:
-                    # Check dtypes on subsequent passes and warn if not fp32
+                    # Check for NaN/inf and dtype issues on subsequent passes
+                    if torch.isnan(query_tokens_fp32).any() or torch.isinf(query_tokens_fp32).any():
+                        query_max = torch.max(torch.abs(query_tokens_fp32)).item()
+                        print(f"WARNING: query_tokens_fp32 has NaN/inf! max: {query_max}")
+                    if torch.isnan(adapted_audio_fp32).any() or torch.isinf(adapted_audio_fp32).any():
+                        audio_max = torch.max(torch.abs(adapted_audio_fp32)).item()
+                        print(f"WARNING: adapted_audio_fp32 has NaN/inf! max: {audio_max}")
                     if query_tokens_fp32.dtype != torch.float32:
                         print(f"WARNING: query_tokens_fp32 not fp32: {query_tokens_fp32.dtype}")
                     if adapted_audio_fp32.dtype != torch.float32:
@@ -1460,12 +1468,17 @@ class Qwen2VLAudioModel(Qwen2VLPreTrainedModel):
                 # Project Q-Former output to LLM hidden size
                 query_output = qformer_outputs.last_hidden_state  # (B, 512, 768) in fp32
                 
-                # Debug: Check Q-Former output dtype on first pass and warn if not fp32
+                # Debug: Check Q-Former output dtype and values
                 if not hasattr(self, '_qformer_dtype_printed'):
-                    print(f"Q-Former output dtype: {query_output.dtype}")
+                    qformer_max = torch.max(torch.abs(query_output)).item()
+                    print(f"Q-Former output dtype: {query_output.dtype}, max: {qformer_max:.4f}")
                     self._qformer_dtype_printed = True
                 else:
-                    # Warn on subsequent passes if Q-Former output is not fp32
+                    # Check for NaN/inf in Q-Former output
+                    qformer_max = torch.max(torch.abs(query_output)).item()
+                    if torch.isnan(query_output).any() or torch.isinf(query_output).any():
+                        print(f"WARNING: Q-Former output has NaN/inf values! max: {qformer_max}")
+                    # Warn if not fp32
                     if query_output.dtype != torch.float32:
                         print(f"WARNING: Q-Former output not fp32: {query_output.dtype}")
                 
@@ -2596,12 +2609,20 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
                     query_tokens_fp32 = query_tokens.to(torch.float32)
                     adapted_audio_fp32 = adapted_audio.to(torch.float32)
                     
-                    # Debug: Print dtypes on first forward pass and warn if not fp32
+                    # Debug: Print dtypes and check for NaN/inf on first forward pass
                     if not hasattr(self, '_dtype_printed'):
-                        print(f"Debug dtypes - query_tokens_fp32: {query_tokens_fp32.dtype}, adapted_audio_fp32: {adapted_audio_fp32.dtype}")
+                        query_max = torch.max(torch.abs(query_tokens_fp32)).item()
+                        audio_max = torch.max(torch.abs(adapted_audio_fp32)).item()
+                        print(f"Debug dtypes - query_tokens_fp32: {query_tokens_fp32.dtype} (max: {query_max:.4f}), adapted_audio_fp32: {adapted_audio_fp32.dtype} (max: {audio_max:.4f})")
                         self._dtype_printed = True
                     else:
-                        # Check dtypes on subsequent passes and warn if not fp32
+                        # Check for NaN/inf and dtype issues on subsequent passes
+                        if torch.isnan(query_tokens_fp32).any() or torch.isinf(query_tokens_fp32).any():
+                            query_max = torch.max(torch.abs(query_tokens_fp32)).item()
+                            print(f"WARNING: query_tokens_fp32 has NaN/inf! max: {query_max}")
+                        if torch.isnan(adapted_audio_fp32).any() or torch.isinf(adapted_audio_fp32).any():
+                            audio_max = torch.max(torch.abs(adapted_audio_fp32)).item()
+                            print(f"WARNING: adapted_audio_fp32 has NaN/inf! max: {audio_max}")
                         if query_tokens_fp32.dtype != torch.float32:
                             print(f"WARNING: query_tokens_fp32 not fp32: {query_tokens_fp32.dtype}")
                         if adapted_audio_fp32.dtype != torch.float32:
@@ -2618,12 +2639,17 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
                     # Project Q-Former output to LLM hidden size
                     query_output = qformer_outputs.last_hidden_state  # (B, 512, 768) in fp32
                     
-                    # Debug: Check Q-Former output dtype on first pass and warn if not fp32
+                    # Debug: Check Q-Former output dtype and values
                     if not hasattr(self, '_qformer_dtype_printed'):
-                        print(f"Q-Former output dtype: {query_output.dtype}")
+                        qformer_max = torch.max(torch.abs(query_output)).item()
+                        print(f"Q-Former output dtype: {query_output.dtype}, max: {qformer_max:.4f}")
                         self._qformer_dtype_printed = True
                     else:
-                        # Warn on subsequent passes if Q-Former output is not fp32
+                        # Check for NaN/inf in Q-Former output
+                        qformer_max = torch.max(torch.abs(query_output)).item()
+                        if torch.isnan(query_output).any() or torch.isinf(query_output).any():
+                            print(f"WARNING: Q-Former output has NaN/inf values! max: {qformer_max}")
+                        # Warn if not fp32
                         if query_output.dtype != torch.float32:
                             print(f"WARNING: Q-Former output not fp32: {query_output.dtype}")
                     
