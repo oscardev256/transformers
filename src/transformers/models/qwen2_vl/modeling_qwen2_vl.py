@@ -2330,7 +2330,7 @@ class Qwen2VLAudioForConditionalGeneration(Qwen2VLForConditionalGeneration):
             
             # Add dimension adapter: Whisper (384D) -> BLIP-2 expected size
             d_audio = whisper_cfg.d_model  # 384
-            encoder_hidden_size = blip2_model.config.encoder_hidden_size  # 1408 (ViT size)
+            encoder_hidden_size = blip2_model.config.qformer_config.encoder_hidden_size  # 1408 (ViT size)
             qformer_hidden = blip2_model.config.qformer_config.hidden_size  # 768
             
             self.audio_adapter = nn.Linear(d_audio, encoder_hidden_size, bias=False)  # 384 -> 1408
